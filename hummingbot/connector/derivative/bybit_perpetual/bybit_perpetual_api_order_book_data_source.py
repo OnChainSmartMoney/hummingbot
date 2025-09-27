@@ -58,7 +58,29 @@ class BybitPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         if not funding_info_response["result"]:
             self._connector.logger().warning(f"Failed to get funding info for {trading_pair}")
             raise ValueError(f"Failed to get funding info for {trading_pair}")
+
         general_info = funding_info_response["result"]["list"][0]
+
+        endpoint_info = CONSTANTS.QUERY_SYMBOL_ENDPOINT
+
+        url_info = web_utils.get_rest_url_for_endpoint(
+            endpoint=endpoint_info, trading_pair=trading_pair, domain=self._domain
+        )
+
+        limit_id = web_utils.get_rest_api_limit_id_for_endpoint(endpoint_info)
+
+        funding_interval_response = await rest_assistant.execute_request(
+            url=url_info,
+            throttler_limit_id=limit_id,
+            params=params,
+            method=RESTMethod.GET,
+        )
+
+        if not funding_interval_response["result"] or not funding_interval_response["result"]["list"]:
+            self._connector.logger().warning(f"Failed to get funding interval for {trading_pair}")
+            funding_interval = None
+
+        funding_interval = int(funding_interval_response["result"]["list"][0]["fundingInterval"])
 
         funding_info = FundingInfo(
             trading_pair=trading_pair,
@@ -66,6 +88,7 @@ class BybitPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
             mark_price=Decimal(str(general_info["markPrice"])),
             next_funding_utc_timestamp=int(general_info["nextFundingTime"]) // 1000,
             rate=Decimal(str(general_info["fundingRate"])),
+            funding_interval=funding_interval,
         )
         return funding_info
 
