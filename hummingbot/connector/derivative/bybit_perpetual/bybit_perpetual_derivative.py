@@ -398,7 +398,8 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
                 await self._order_tracker.process_order_not_found(active_order.client_order_id)
 
         for order_status in parsed_status_responses:
-            self._process_order_event_message(order_status["list"][0])
+            if order_status["list"]:
+                self._process_order_event_message(order_status["list"][0])
 
     async def _update_balances(self):
         """
