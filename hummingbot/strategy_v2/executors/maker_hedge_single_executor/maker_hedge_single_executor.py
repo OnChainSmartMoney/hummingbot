@@ -457,21 +457,17 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             if mdp is None:
                 return
             entry_fi = mdp.get_funding_info(self.maker_connector, self.maker_pair)
-            self.logger().info(f"[FundingMonitor] entry_fi: {entry_fi}")
             hedge_fi = mdp.get_funding_info(self.hedge_connector, self.hedge_pair)
-            self.logger().info(f"[FundingMonitor] hedge_fi: {hedge_fi}")
             if entry_fi is None or hedge_fi is None:
                 return
             entry_sec = util_normalized_funding_rate_in_seconds(entry_fi, self.maker_connector)
             hedge_sec = util_normalized_funding_rate_in_seconds(hedge_fi, self.hedge_connector)
-            self.logger().info(f"[FundingMonitor] hedge_sec: {hedge_sec}")
             if entry_sec is None or hedge_sec is None:
                 return
 
             funding_profitability_interval_hours = getattr(self.config, "funding_profitability_interval_hours", 24)
             # Raw diff as hedge - entry
             diff_pct_raw = util_funding_diff_pct(entry_sec, hedge_sec, hours=funding_profitability_interval_hours)
-            self.logger().info(f"[FundingMonitor] raw_diff_pct(hedge-entry): {diff_pct_raw}")
             if diff_pct_raw is None:
                 return
             # Orient by our actual position: positive means beneficial carry, negative means harmful
@@ -485,7 +481,7 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                 oriented_diff_pct = diff_pct_raw
             self._funding_last_diff_pct = oriented_diff_pct
             self.logger().info(
-                f"[FundingMonitor] oriented_diff_pct(for position maker={'LONG' if self.side_maker == TradeType.BUY else 'SHORT'}): {oriented_diff_pct}"
+                f"[FundingMonitor] {self.maker_pair} oriented_diff_pct(for position maker={'LONG' if self.side_maker == TradeType.BUY else 'SHORT'}): {oriented_diff_pct}"
             )
 
             # Backward-compat: accept bp-based threshold if provided; prefer pct if available

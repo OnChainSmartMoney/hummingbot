@@ -29,3 +29,13 @@ class MakerHedgeSingleExecutorConfig(ExecutorConfigBase):
     exit_funding_diff_pct_threshold: Decimal | None = None
     exit_hold_below_sec: int = 60
     funding_profitability_interval_hours: int = 24
+
+    @property
+    def trading_pair(self) -> str:
+        """Primary trading pair for this executor (maker leg)."""
+        return self.maker_market.trading_pair
+
+    @property
+    def connector_name(self) -> str:
+        """Primary connector name for this executor (maker leg)."""
+        return self.maker_market.connector_name
