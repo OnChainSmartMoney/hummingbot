@@ -50,7 +50,7 @@ class BybitPerpetualAuth(AuthBase):
 
         :return: request object updated with xauth headers
         """
-        ts = str(int(time.time() * 10 ** 3))
+        ts = str(int(time.time() * 10 ** 3) - 5000)  # temp solution to avoid timestamp errors, will be replaced
 
         headers = {}
         headers["X-BAPI-TIMESTAMP"] = str(ts)
