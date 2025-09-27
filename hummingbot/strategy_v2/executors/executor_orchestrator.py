@@ -17,6 +17,9 @@ from hummingbot.strategy_v2.executors.arbitrage_executor.arbitrage_executor impo
 from hummingbot.strategy_v2.executors.data_types import PositionSummary
 from hummingbot.strategy_v2.executors.dca_executor.dca_executor import DCAExecutor
 from hummingbot.strategy_v2.executors.grid_executor.grid_executor import GridExecutor
+from hummingbot.strategy_v2.executors.maker_hedge_single_executor.maker_hedge_single_executor import (
+    MakerHedgeSingleExecutor,
+)
 from hummingbot.strategy_v2.executors.order_executor.order_executor import OrderExecutor
 from hummingbot.strategy_v2.executors.position_executor.position_executor import PositionExecutor
 from hummingbot.strategy_v2.executors.twap_executor.twap_executor import TWAPExecutor
@@ -145,6 +148,7 @@ class ExecutorOrchestrator:
         "twap_executor": TWAPExecutor,
         "xemm_executor": XEMMExecutor,
         "order_executor": OrderExecutor,
+        "maker_hedge_single_executor": MakerHedgeSingleExecutor,
     }
 
     @classmethod
