@@ -260,7 +260,8 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         position = Decimal("0")
         for order in orders:
             exec_base = order.executed_amount_base or Decimal("0")
-            if order.order and exec_base > 0:
+            # count any executed amount regardless of current open state (captures partial fills on canceled orders)
+            if exec_base > 0:
                 position += exec_base
         return position
 
@@ -730,6 +731,29 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             remaining = Decimal("0")
         return remaining
 
+    def _hedge_remaining_exposure_base(self) -> Decimal:
+        """
+        Compute remaining hedge exposure in base units using only the executor's tracked orders.
+        remaining = sum(executed_base for hedge OPEN orders) - sum(executed_base for hedge CLOSE orders)
+        Clamped to >= 0.
+        """
+        open_base = Decimal("0")
+        close_base = Decimal("0")
+        for o in self._hedge_orders:
+            if o.order is None:
+                continue
+            try:
+                if o.order.position == PositionAction.OPEN:
+                    open_base += (o.executed_amount_base or Decimal("0"))
+                elif o.order.position == PositionAction.CLOSE:
+                    close_base += (o.executed_amount_base or Decimal("0"))
+            except Exception:
+                pass
+        remaining = open_base - close_base
+        if remaining < 0:
+            remaining = Decimal("0")
+        return remaining
+
     def _build_close_queue_if_needed(self):
         if self._close_queue:
             return
@@ -813,6 +837,14 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         # maker OPEN fill
         mo = self._maker_by_id.get(event.order_id)
         if mo:
+            # Refresh tracked in-flight order so executed amounts remain accurate
+            try:
+                updated = self.get_in_flight_order(self._market_name(market), event.order_id)
+                if updated:
+                    mo.order = updated
+                    self.replace_order(mo, is_maker=True)
+            except Exception:
+                pass
             filled_base = Decimal(str(event.amount))
             self._add_fee_quote(event.trade_fee, mid_maker, self.maker_pair)
             self._hedge_accum_base += filled_base
@@ -882,9 +914,33 @@ class MakerHedgeSingleExecutor(ExecutorBase):
 
         # generic removes
         if event.order_id in self._maker_by_id:
-            self.remove_order(event.order_id, is_maker=True)
+            to = self._maker_by_id.get(event.order_id)
+            # refresh latest state if possible
+            try:
+                updated = self.get_in_flight_order(self._market_name(market), event.order_id)
+                if updated:
+                    to.order = updated
+            except Exception:
+                pass
+            exec_base = to.executed_amount_base or Decimal("0")
+            if exec_base <= 0:
+                self.remove_order(event.order_id, is_maker=True)
+            else:
+                self.logger().info(f"Maker order {event.order_id} canceled with partial fill {exec_base}; keeping for exposure accounting.")
         elif event.order_id in self._hedge_by_id:
-            self.remove_order(event.order_id, is_maker=False)
+            to = self._hedge_by_id.get(event.order_id)
+            # refresh and keep if partially filled to preserve exposure calc
+            try:
+                updated = self.get_in_flight_order(self._market_name(market), event.order_id)
+                if updated:
+                    to.order = updated
+            except Exception:
+                pass
+            exec_base = to.executed_amount_base or Decimal("0")
+            if exec_base <= 0:
+                self.remove_order(event.order_id, is_maker=False)
+            else:
+                self.logger().info(f"Hedge order {event.order_id} canceled with partial fill {exec_base}; keeping for exposure accounting.")
 
         # hedge capacity free / maker pending clear
         self._hedge_inflight.discard(event.order_id)
@@ -922,30 +978,29 @@ class MakerHedgeSingleExecutor(ExecutorBase):
     # ========== Lifecycle ==========
 
     def close_all_positions_by_market(self):
-        maker_position_base_amount = self.get_full_position_base_amount(is_maker=True)
-        self.logger().info(f"Closing maker position via market: {maker_position_base_amount} {self.maker_pair}")
-        hedge_position_base_amount = self.get_full_position_base_amount(is_maker=False)
-        self.logger().info(f"Closing hedge position via market: {hedge_position_base_amount} {self.hedge_pair}")
+        # Use net exposure (OPEN - CLOSE) to compute amounts, so partial fills on canceled orders are not lost
+        maker_exposure = self._maker_remaining_exposure_base()
+        hedge_exposure = self._hedge_remaining_exposure_base()
+        self.logger().info(f"Closing maker position via market: {maker_exposure} {self.maker_pair}")
+        self.logger().info(f"Closing hedge position via market: {hedge_exposure} {self.hedge_pair}")
 
-        if maker_position_base_amount > 0:
-            self.logger().info(f"Closing maker position via market: {maker_position_base_amount} {self.maker_pair}")
+        if maker_exposure > 0:
             self.place_order(
                 connector_name=self.maker_connector,
                 trading_pair=self.maker_pair,
                 order_type=OrderType.MARKET,
                 side=self._opposite_side(self.side_maker),
-                amount=maker_position_base_amount,
+                amount=maker_exposure,
                 position_action=PositionAction.CLOSE,
             )
 
-        if hedge_position_base_amount > 0:
-            self.logger().info(f"Closing hedge position via market: {hedge_position_base_amount} {self.hedge_pair}")
+        if hedge_exposure > 0:
             self.place_order(
                 connector_name=self.hedge_connector,
                 trading_pair=self.hedge_pair,
                 order_type=OrderType.MARKET,
                 side=self._opposite_side(self.side_hedge),
-                amount=hedge_position_base_amount,
+                amount=hedge_exposure,
                 position_action=PositionAction.CLOSE,
             )
 
