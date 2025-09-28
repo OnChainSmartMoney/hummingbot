@@ -1,0 +1,6 @@
+# Config for scripts/v2_with_controllers.py
+# It loads Funding Rate Arb controller config from conf/controllers
+
+candles_config: []
+markets: "bybit_perpetual.BTC-USDT,ETH-USDT:hyperliquid_perpetual.BTC-USD,ETH-USD"
+controllers_config: "conf_funding_rate_arb_controller.yml"
