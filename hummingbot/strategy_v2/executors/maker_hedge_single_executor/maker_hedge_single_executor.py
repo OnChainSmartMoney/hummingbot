@@ -183,10 +183,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
     def get_last_active_unfilled_order(self, is_maker: bool) -> Optional[TrackedOrder]:
         orders = self._maker_orders if is_maker else self._hedge_orders
         if orders:
-            try:
-                self.logger().debug(f"{'Maker' if is_maker else 'Hedge'} orders: {json.dumps(self._format_tracked_orders(orders), ensure_ascii=False)}")
-            except Exception:
-                self.logger().debug(f"{'Maker' if is_maker else 'Hedge'} orders: {self._format_tracked_orders(orders)}")
             for order in reversed(orders):
                 if order.is_filled:
                     continue
@@ -454,26 +450,49 @@ class MakerHedgeSingleExecutor(ExecutorBase):
 
     # ===== Funding monitor helpers =====
 
-    def _monitor_funding_and_maybe_trigger_exit(self, now_ts: float):
+    def _get_normalized_funding_rates(self) -> Optional[Dict[str, Union[Decimal, None]]]:
         try:
             mdp = getattr(self._strategy, "market_data_provider", None)
             if mdp is None:
-                return
+                return None
             entry_fi = mdp.get_funding_info(self.maker_connector, self.maker_pair)
             hedge_fi = mdp.get_funding_info(self.hedge_connector, self.hedge_pair)
             if entry_fi is None or hedge_fi is None:
-                return
+                return None
             entry_sec = util_normalized_funding_rate_in_seconds(entry_fi, self.maker_connector)
             hedge_sec = util_normalized_funding_rate_in_seconds(hedge_fi, self.hedge_connector)
-            if entry_sec is None or hedge_sec is None:
-                return
+            return {
+                "entry": entry_sec,
+                "hedge": hedge_sec,
+            }
+        except Exception:
+            return None
 
-            funding_profitability_interval_hours = getattr(self.config, "funding_profitability_interval_hours", 24)
-            # Raw diff as hedge - entry
-            diff_pct_raw = util_funding_diff_pct(entry_sec, hedge_sec, hours=funding_profitability_interval_hours)
+    def _get_funding_diff_pct(self, funding_interval_hours: Optional[int] = None) -> Optional[Decimal]:
+        try:
+            rates = self._get_normalized_funding_rates()
+            if rates is None:
+                self.logger().info("Funding rates unavailable")
+                return None
+            entry_sec = rates.get("entry")
+            hedge_sec = rates.get("hedge")
+            if entry_sec is None or hedge_sec is None:
+                self.logger().info("Funding rates unavailable")
+                return None
+            funding_profitability_interval_hours = getattr(self.config, "funding_profitability_interval_hours", 24) if funding_interval_hours is None else funding_interval_hours
+            diff_pct = util_funding_diff_pct(entry_sec, hedge_sec, hours=funding_profitability_interval_hours)
+            if diff_pct is None:
+                return None
+            return Decimal(str(diff_pct))
+        except Exception:
+            return None
+
+    def _get_oriented_funding_diff_pct(self, funding_interval_hours: Optional[int] = None) -> Optional[Decimal]:
+        try:
+            diff_pct_raw = self._get_funding_diff_pct(funding_interval_hours)
             if diff_pct_raw is None:
-                return
-            # Orient by our actual position: positive means beneficial carry, negative means harmful
+                self.logger().info("Funding rates unavailable")
+                return None
             try:
                 side_factor = Decimal("1") if self.side_maker == TradeType.BUY else Decimal("-1")
             except Exception:
@@ -482,6 +501,16 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                 oriented_diff_pct = Decimal(str(diff_pct_raw)) * side_factor
             except Exception:
                 oriented_diff_pct = diff_pct_raw
+            return oriented_diff_pct
+        except Exception:
+            return None
+
+    def _monitor_funding_and_maybe_trigger_exit(self, now_ts: float):
+        try:
+            oriented_diff_pct = self._get_oriented_funding_diff_pct()
+            if oriented_diff_pct is None:
+                self.logger().info("Funding rates unavailable")
+                return None
             self._funding_last_diff_pct = oriented_diff_pct
             self.logger().info(
                 f"[FundingMonitor] {self.maker_pair} oriented_diff_pct(for position maker={'LONG' if self.side_maker == TradeType.BUY else 'SHORT'}): {oriented_diff_pct}"
@@ -533,8 +562,65 @@ class MakerHedgeSingleExecutor(ExecutorBase):
     def _check_profitability_enter_condition(self, maker_side: TradeType, maker_price: Decimal, amount: Decimal) -> bool:
         if self._closing:
             return True
-        # Placeholder for future profitability-based entry condition
-        return True
+
+        mdp = getattr(self._strategy, "market_data_provider", None)
+
+        hedge_side = self._get_hedge_side_for_mode()
+        hedge_price = Decimal(mdp.get_price_for_quote_volume(
+            connector_name=self.hedge_connector,
+            trading_pair=self.hedge_pair,
+            quote_volume=amount * maker_price,
+            is_buy=hedge_side == TradeType.BUY,
+        ).result_price)
+        self.logger().info(f"Entry prices: maker {maker_price:.8f} exchange {self.maker_connector} side {maker_side} hedge {hedge_price:.8f} exchange {self.hedge_connector} side {hedge_side} for amount {amount:.8f}")
+
+        maker_estimated_fees = self.connectors[self.maker_connector].get_fee(
+            base_currency=self.maker_pair.split("-")[0],
+            quote_currency=self.maker_pair.split("-")[1],
+            order_type=OrderType.LIMIT_MAKER,
+            order_side=maker_side,
+            amount=amount,
+            price=maker_price,
+            is_maker=True,
+            position_action=PositionAction.OPEN
+        ).percent * 2  # entry + exit
+        hedge_estimated_fees = self.connectors[self.hedge_connector].get_fee(
+            base_currency=self.hedge_pair.split("-")[0],
+            quote_currency=self.hedge_pair.split("-")[1],
+            order_type=OrderType.MARKET,
+            order_side=hedge_side,
+            amount=amount,
+            price=hedge_price,
+            is_maker=False,
+            position_action=PositionAction.OPEN
+        ).percent * 2  # entry + exit
+        self.logger().info(f"Estimated fees: maker {maker_estimated_fees:.6f} hedge {hedge_estimated_fees:.6f}")
+
+        if maker_side == TradeType.BUY:
+            estimated_trade_pnl_pct = (hedge_price - maker_price) / maker_price
+        else:
+            estimated_trade_pnl_pct = (maker_price - hedge_price) / maker_price
+
+        self.logger().info(f"Estimated trade PnL%: {estimated_trade_pnl_pct:.6f}")
+
+        total_estimated_fees = maker_estimated_fees + hedge_estimated_fees
+        net_estimated_pnl_pct = estimated_trade_pnl_pct - total_estimated_fees
+
+        if net_estimated_pnl_pct > Decimal("0"):
+            self.logger().info(f"Net estimated PnL% after fees: {net_estimated_pnl_pct:.6f} (fees total {total_estimated_fees:.6f}) - PROFITABLE")
+            return True
+
+        oriented_funding_diff_pct = self._get_oriented_funding_diff_pct(funding_interval_hours=1)
+        if oriented_funding_diff_pct is None:
+            self.logger().info("Funding rates unavailable - skipping profitability-based entry condition")
+            return False
+
+        if (oriented_funding_diff_pct + net_estimated_pnl_pct) > Decimal("0"):
+            self.logger().info(f"Net estimated PnL% after fees: {net_estimated_pnl_pct:.6f} + funding {oriented_funding_diff_pct:.6f} = {(net_estimated_pnl_pct + oriented_funding_diff_pct):.6f} - PROFITABLE with funding")
+            return True
+        else:
+            self.logger().info(f"Net estimated PnL% after fees: {net_estimated_pnl_pct:.6f} + funding {oriented_funding_diff_pct:.6f} = {(net_estimated_pnl_pct + oriented_funding_diff_pct):.6f} - NOT PROFITABLE")
+            return False
 
     def _compute_limit_price(self, side: TradeType, mid: Optional[Decimal] = None) -> Optional[Decimal]:
         """
@@ -793,6 +879,13 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             return self._opposite_side(self.side_maker)
         else:
             return self.side_maker
+
+    def _get_hedge_side_for_mode(self) -> TradeType:
+        if self._closing:
+            # close side is opposite to initial
+            return self._opposite_side(self.side_hedge)
+        else:
+            return self.side_hedge
 
     # ========== Event handlers ==========
 
