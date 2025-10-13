@@ -6,8 +6,7 @@ from decimal import Decimal, getcontext
 from typing import Dict, List, Optional, Union
 
 from hummingbot.connector.connector_base import ConnectorBase
-from hummingbot.core.data_type.common import PositionMode  # add import
-from hummingbot.core.data_type.common import OrderType, PositionAction, PriceType, TradeType
+from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, PriceType, TradeType
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
     BuyOrderCreatedEvent,
@@ -24,6 +23,7 @@ from hummingbot.strategy_v2.models.base import RunnableStatus
 from hummingbot.strategy_v2.models.executors import CloseType, TrackedOrder
 from hummingbot.strategy_v2.utils.funding import (
     funding_diff_pct as util_funding_diff_pct,
+    minutes_to_next_funding as util_minutes_to_next_funding,
     normalized_funding_rate_in_seconds as util_normalized_funding_rate_in_seconds,
 )
 
@@ -38,7 +38,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         return cls._logger
 
     def __init__(self, strategy, config: MakerHedgeSingleExecutorConfig, update_interval: float = 0.5, max_retries: int = 10):
-        # safer decimal context
         getcontext().prec = 28
 
         self.config = config
@@ -50,47 +49,39 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         self.side_hedge = TradeType.SELL if self.side_maker == TradeType.BUY else TradeType.BUY
         self._max_retries = max_retries
 
-        # leverage flag
         self._leverage_applied: bool = False
 
-        # tracked orders
         self._maker_orders: List[TrackedOrder] = []
         self._hedge_orders: List[TrackedOrder] = []
-        # id -> TrackedOrder for robust correlation
         self._maker_by_id: Dict[str, TrackedOrder] = {}
         self._hedge_by_id: Dict[str, TrackedOrder] = {}
 
-        # hedge in-flight control
         self._hedge_inflight: set[str] = set()
         self._hedge_inflight_amounts: Dict[str, Decimal] = {}
-        self._max_parallel_hedges: int = 2  # tuneable
+        self._max_parallel_hedges: int = 2
 
-        # maker pending (placed but not yet acked by exchange)
         self._maker_pending_ids: set[str] = set()
 
-        # metrics
         self._cum_fees_quote: Decimal = Decimal("0")
         self._net_pnl_quote: Decimal = Decimal("0")
         self._net_pnl_pct: Decimal = Decimal("0")
+        self._cum_funding_maker_quote: Decimal = Decimal("0")
+        self._cum_funding_hedge_quote: Decimal = Decimal("0")
+        self._cum_funding_quote: Decimal = Decimal("0")
 
-        # pacing
         self._next_order_ready_ts: float = 0.0
 
-        # accumulators
         self._hedge_accum_base = Decimal("0")
 
-        # closing workflow
         self._closing: bool = False
         self._close_queue: List[Dict] = []
-        self._closing_current: Optional[Dict] = None  # {"open_id", "close_order_id", "placed_amount", "executed_base", "creation_ts"}
+        self._closing_current: Optional[Dict] = None
 
-        # legacy (not used directly)
         self._waiting_hedge_ack: bool = False
         self._last_hedge_order_id: Optional[str] = None
 
         self._opening_fully_completed: bool = False
 
-        # Funding monitor state
         self._funding_below_start_ts: Optional[float] = None
         self._funding_last_diff_pct: Optional[Decimal] = None
         self._funding_exit_triggered: bool = False
@@ -109,8 +100,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         except Exception as e:
             self.logger().warning(f"Could not request HEDGE position mode on {self.hedge_connector}: {e}")
         await super().on_start()
-
-    # ========== Order book-keeping ==========
 
     def add_order(self, order: TrackedOrder, is_maker: bool):
         if is_maker:
@@ -155,7 +144,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             self._strategy.cancel(conn, pair, order.order_id)
         except Exception as e:
             self.logger().warning(f"Cancel failed {order.order_id} on {conn}:{pair}: {e}")
-        # remove if zero executed, keep partial to close later
         if exec_base <= 0:
             self.remove_order(order.order_id, is_maker=is_maker)
 
@@ -186,8 +174,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             for order in reversed(orders):
                 if order.is_filled:
                     continue
-                # consider as active if: (a) we have in-flight order object and it's not filled
-                # or (b) order is still pending ack from exchange
                 if order.order is not None:
                     return order
                 if is_maker and order.order_id in self._maker_pending_ids:
@@ -202,10 +188,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         return consumed
 
     def get_maker_order_usd_inflight(self) -> Decimal:
-        """
-        Approximate notional (in quote) of maker orders that are currently open and not fully filled.
-        Uses remaining base amount times the order's current limit price. Conservative to avoid cap overruns.
-        """
         inflight = Decimal("0")
         for order in self._maker_orders:
             o = order.order
@@ -221,7 +203,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                         if px > 0:
                             inflight += remaining_base * px
             except Exception:
-                # best-effort; ignore any malformed in-flight order
                 continue
         return inflight
 
@@ -258,24 +239,15 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         position = Decimal("0")
         for order in orders:
             exec_base = order.executed_amount_base or Decimal("0")
-            # count any executed amount regardless of current open state (captures partial fills on canceled orders)
             if exec_base > 0:
                 position += exec_base
         return position
 
-    # ========== Balance & fees helpers ==========
-
     def _add_fee_quote(self, trade_fee, price_mid: Decimal, pair: str):
-        """
-        Sum flat fees and approximate percent fee into quote currency.
-        If flat fee token equals base -> convert via mid; if equals quote -> add as is;
-        else fallback to adding as quote (best effort).
-        """
         try:
             if trade_fee is None:
                 return
             base, quote = pair.split("-")
-            # flat fees
             flat_fees = getattr(trade_fee, "flat_fees", None) or []
             for ff in flat_fees:
                 amt = Decimal(str(getattr(ff, "amount", "0")))
@@ -288,12 +260,10 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                     self._cum_fees_quote += amt
                 else:
                     self._cum_fees_quote += amt
-            # percent fee best effort: if executed_quote is later surfaced, add it there
         except Exception:
             pass
 
     async def validate_sufficient_balance(self):
-        # required margin = next_notional_usd / leverage
         mid = self.get_price(self.maker_connector, self.maker_pair, PriceType.MidPrice)
         if mid.is_nan() or mid <= 0:
             self.logger().info("Entry mid price unavailable; proceeding but orders may fail.")
@@ -319,16 +289,12 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                 f"Insufficient {quote} margin: need {required_margin:.6f} (next_notional {next_notional_usd:.6f}/lev {leverage}), have {avail_quote:.6f}."
             )
 
-    # ========== Control loop ==========
-
     async def control_task(self):
         if self.status == RunnableStatus.RUNNING:
-            # Block order placement until hedge connector is in HEDGE mode (avoids Bybit 'position idx' error)
             try:
                 hedge_market = self._strategy.connectors[self.hedge_connector]
                 mode = getattr(hedge_market, "position_mode", None)
                 if mode != PositionMode.HEDGE:
-                    # re-request to be safe (idempotent in connectors)
                     try:
                         self._strategy.set_position_mode(self.hedge_connector, PositionMode.HEDGE)
                     except Exception:
@@ -336,11 +302,9 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                     self.logger().warning(f"{self.hedge_connector} is not in HEDGE mode yet. Waiting before placing orders...")
                     return
             except Exception:
-                # if we cannot read mode, be conservative and wait
                 self.logger().warning(f"Unable to verify position mode for {self.hedge_connector}. Waiting...")
                 return
 
-            # Ensure leverage configured
             if not self._leverage_applied:
                 try:
                     lev = int(self.config.leverage) if getattr(self.config, "leverage", None) is not None else 1
@@ -364,15 +328,12 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             now = self._strategy.current_timestamp
 
             if self._opening_fully_completed and not self._closing:
-                # Start/continue funding monitoring phase
                 self._monitor_funding_and_maybe_trigger_exit(now)
                 return
 
-            # Handle TTL for CLOSE order that is tracked in _closing_current
             if self._closing and self._closing_current and (self.config.maker_ttl_sec and self.config.maker_ttl_sec > 0):
                 close_creation_ts = self._closing_current.get("creation_ts", 0) or 0
                 if close_creation_ts > 0 and (now - close_creation_ts) >= float(self.config.maker_ttl_sec):
-                    # Cancel and requeue remaining, then place again next loop
                     try:
                         close_id = self._closing_current.get("close_order_id")
                         placed = self._closing_current.get("placed_amount", Decimal("0"))
@@ -380,10 +341,8 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                         remaining = placed - executed
                         if remaining > 0 and close_id:
                             self.logger().info(f"CLOSE TTL exceeded for {close_id}; cancel and re-quote remaining {remaining}.")
-                            # cancel
                             pair = self.maker_pair
                             self._strategy.cancel(self.maker_connector, pair, close_id)
-                            # queue remaining to end to avoid starvation
                             self._close_queue.append({"open_id": self._closing_current.get("open_id"), "amount": remaining})
                         else:
                             self.logger().info(f"CLOSE TTL exceeded for {close_id}; nothing remaining.")
@@ -391,14 +350,11 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                         self.logger().warning(f"Error during CLOSE TTL handling: {e}")
                     finally:
                         self._closing_current = None
-                        # small pacing
                         self._next_order_ready_ts = now + 0.2
 
-            # Place maker order if none and budget remains (open) or next item in close queue (closing)
             last_unfilled_order = self.get_last_active_unfilled_order(is_maker=True)
             self.logger().debug(f"Last unfilled maker order: {last_unfilled_order.order_id if last_unfilled_order else None}")
 
-            # NEW: if there is any maker order pending ack, don't place a new one
             if last_unfilled_order is None and self._closing_current is None:
                 if self._maker_pending_ids:
                     return
@@ -409,7 +365,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                         self.logger().warning(f"Not enough remaining maker cap to place new order, remaining cap: ${remaining_cap:.2f}, need at least: ${self.config.per_order_min_notional_usd:.2f}. Completing executor.")
                         self._opening_fully_completed = True
                         return
-                    # Validate margin for entry
                     await self.validate_sufficient_balance()
 
                 if now < self._next_order_ready_ts:
@@ -417,7 +372,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
 
                 await self._place_next_part()
             if last_unfilled_order and not self._opening_fully_completed:
-                # Enforce TTL on OPEN maker order in book (standard path)
                 if not self._closing and self.config.maker_ttl_sec and self.config.maker_ttl_sec > 0:
                     unfilled_maker_creation_time = getattr(last_unfilled_order, "creation_timestamp", 0) or 0
                     if unfilled_maker_creation_time > 0 and (now - unfilled_maker_creation_time) >= float(self.config.maker_ttl_sec):
@@ -425,10 +379,7 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                         self.cancel_order(last_unfilled_order, is_maker=True)
 
         elif self.status == RunnableStatus.SHUTTING_DOWN:
-            # graceful shutdown; close loop handles itself
             pass
-
-    # ===== Price helpers =====
 
     def _get_mid(self) -> Decimal:
         px = self.get_price(self.maker_connector, self.maker_pair, PriceType.MidPrice)
@@ -447,8 +398,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             return None if ask.is_nan() else ask
         except Exception:
             return None
-
-    # ===== Funding monitor helpers =====
 
     def _get_normalized_funding_rates(self) -> Optional[Dict[str, Union[Decimal, None]]]:
         try:
@@ -516,20 +465,9 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                 f"[FundingMonitor] {self.maker_pair} oriented_diff_pct(for position maker={'LONG' if self.side_maker == TradeType.BUY else 'SHORT'}): {oriented_diff_pct}"
             )
 
-            # Backward-compat: accept bp-based threshold if provided; prefer pct if available
             pct_threshold = getattr(self.config, "exit_funding_diff_pct_threshold", None)
             hold_sec = getattr(self.config, "exit_hold_below_sec", None)
-            if pct_threshold is None or hold_sec is None:
-                return
-            try:
-                pct_threshold = Decimal(str(pct_threshold))
-                self.logger().info(f"[FundingMonitor] threshold_pct: {pct_threshold}")
-            except Exception:
-                return
-            if oriented_diff_pct is None:
-                return
 
-            # Exit condition: funding edge for our current position is at/below threshold
             if oriented_diff_pct <= pct_threshold:
                 if self._funding_below_start_ts is None:
                     self._funding_below_start_ts = now_ts
@@ -556,7 +494,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         )
         self._closing = True
         self._build_close_queue_if_needed()
-        # Reset monitor state
         self._funding_below_start_ts = None
 
     def _check_profitability_enter_condition(self, maker_side: TradeType, maker_price: Decimal, amount: Decimal) -> bool:
@@ -583,7 +520,7 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             price=maker_price,
             is_maker=True,
             position_action=PositionAction.OPEN
-        ).percent * 2  # entry + exit
+        ).percent * 2
         hedge_estimated_fees = self.connectors[self.hedge_connector].get_fee(
             base_currency=self.hedge_pair.split("-")[0],
             quote_currency=self.hedge_pair.split("-")[1],
@@ -593,7 +530,7 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             price=hedge_price,
             is_maker=False,
             position_action=PositionAction.OPEN
-        ).percent * 2  # entry + exit
+        ).percent * 2
         self.logger().info(f"Estimated fees: maker {maker_estimated_fees:.6f} hedge {hedge_estimated_fees:.6f}")
 
         if maker_side == TradeType.BUY:
@@ -623,13 +560,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             return False
 
     def _compute_limit_price(self, side: TradeType, mid: Optional[Decimal] = None) -> Optional[Decimal]:
-        """
-        Unified limit price computation for both OPEN and CLOSE maker orders.
-        Uses `maker_price_offset_bp` and mid price:
-          - BUY:  price = mid * (1 - offset)
-          - SELL: price = mid * (1 + offset)
-        Returns None if mid is unavailable.
-        """
         if mid is None:
             mid = self._get_mid()
         if mid is None or mid.is_nan() or mid <= 0:
@@ -641,7 +571,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             return mid * (Decimal("1") + off)
 
     async def _place_next_part(self):
-        # Determine chunk amount for OPEN or CLOSE
         mid = self._get_mid()
         if mid.is_nan() or mid <= 0:
             return
@@ -649,12 +578,10 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         maker_side: TradeType = self._get_maker_side_for_mode()
 
         if self._closing:
-            # build close queue once from open executed amounts
             self._build_close_queue_if_needed()
             if self._closing_current is not None:
                 return
             if not self._close_queue:
-                # flush residual hedge
                 self._finalize_hedge_tail()
                 self.logger().info("Close queue is empty; finishing executor.")
                 self.close_type = CloseType.COMPLETED
@@ -672,13 +599,11 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                 self.close_type = CloseType.COMPLETED
                 self.stop()
                 return
-            # Compute final limit price first, then size the amount against that price to avoid cap overshoot
             px_preview = self._compute_limit_price(maker_side, mid)
             if px_preview is None or px_preview <= 0:
                 return
             next_notional_usd = min(remaining_cap, Decimal(str(self.config.per_order_max_notional_usd)))
             self.logger().info(f"Next order notional USD: ${next_notional_usd:.2f} at limit px {px_preview:.8f}")
-            # Size amount conservatively using the limit price, not mid.
             raw_amount = Decimal(str(next_notional_usd)) / px_preview
             maker_min_notional = getattr(self.config, "maker_min_notional_usd", Decimal("0"))
             if maker_min_notional and next_notional_usd < maker_min_notional:
@@ -686,7 +611,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                 return
             mode_desc = "OPEN"
 
-        # Quantize to both connectors so hedge can match sizes
         try:
             entry_conn = self._strategy.connectors[self.maker_connector]
             amt_q_maker = entry_conn.quantize_order_amount(self.maker_pair, raw_amount)
@@ -697,19 +621,15 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             amt_q = raw_amount
         amount = amt_q
 
-        # Price logic
-        # Unified price: same computation for OPEN and CLOSE
         px = self._compute_limit_price(maker_side, mid)
         if px is None or px <= 0:
             return
-        # Final safety: ensure planned notional at px does not exceed remaining cap (due to quantization)
         if not self._closing:
             planned_notional = amount * px
             rem_cap_now = self.get_remaining_maker_cap()
             if planned_notional > rem_cap_now:
                 try:
                     entry_conn = self._strategy.connectors[self.maker_connector]
-                    # reduce amount slightly and requantize
                     adjusted = entry_conn.quantize_order_amount(self.maker_pair, amount * Decimal("0.999"))
                     if adjusted > 0:
                         amount = adjusted
@@ -741,14 +661,10 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             self.logger().info(f"Placed maker CLOSE (LIMIT marketable) for open_id={open_id} -> close_id={order_id} px={px} amt={amount}")
         else:
             self.add_order(new_tracked, is_maker=True)
-            # mark as pending until Created arrives
             self._maker_pending_ids.add(order_id)
-            # small cooldown to avoid double placement even if loop is hot
             cooldown = float(getattr(self.config, "post_place_cooldown_sec", 0.5))
             self._next_order_ready_ts = self._strategy.current_timestamp + cooldown
             self.logger().info(f"Placed maker {mode_desc} order id={order_id} type=LIMIT px={px} amt={amount}")
-
-    # ===== Hedge side =====
 
     def _hedge_market(self, qty_base: Decimal):
         if qty_base <= 0:
@@ -774,7 +690,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             return
         if len(self._hedge_inflight) >= self._max_parallel_hedges:
             return
-        # Quantize to hedge exchange step/limits
         try:
             hedge_connector = self._strategy.connectors[self.hedge_connector]
             q_amt = hedge_connector.quantize_order_amount(self.hedge_pair, self._hedge_accum_base)
@@ -782,7 +697,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             q_amt = self._hedge_accum_base
         if q_amt is None or q_amt <= 0:
             return
-        # Check min notional
         mid = self.get_price(self.hedge_connector, self.hedge_pair, PriceType.MidPrice)
         if mid.is_nan() or mid <= 0:
             return
@@ -790,28 +704,17 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         min_notional = getattr(self.config, "hedge_min_notional_usd", Decimal("0"))
         if notional < min_notional:
             return
-        # Place hedge and reduce accumulator
         self._hedge_market(q_amt)
         self._hedge_accum_base -= q_amt
 
     def _finalize_hedge_tail(self):
-        """
-        On finishing, force-flush any residual hedge accumulator ignoring min_notional
-        to avoid leftover exposure.
-        """
         if self._hedge_accum_base > 0:
             qty = self._hedge_accum_base
             self._hedge_accum_base = Decimal("0")
             self.logger().info(f"Force-flush hedge tail qty={qty}")
             self._hedge_market(qty)
 
-    # ===== Helpers for closing logic =====
     def _maker_remaining_exposure_base(self) -> Decimal:
-        """
-        Compute remaining maker exposure in base units using only the executor's tracked orders.
-        remaining = sum(executed_base for maker OPEN orders) - sum(executed_base for maker CLOSE orders)
-        Clamped to >= 0.
-        """
         open_base = Decimal("0")
         close_base = Decimal("0")
         for o in self._maker_orders:
@@ -830,11 +733,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         return remaining
 
     def _hedge_remaining_exposure_base(self) -> Decimal:
-        """
-        Compute remaining hedge exposure in base units using only the executor's tracked orders.
-        remaining = sum(executed_base for hedge OPEN orders) - sum(executed_base for hedge CLOSE orders)
-        Clamped to >= 0.
-        """
         open_base = Decimal("0")
         close_base = Decimal("0")
         for o in self._hedge_orders:
@@ -875,34 +773,27 @@ class MakerHedgeSingleExecutor(ExecutorBase):
 
     def _get_maker_side_for_mode(self) -> TradeType:
         if self._closing:
-            # close side is opposite to initial
             return self._opposite_side(self.side_maker)
         else:
             return self.side_maker
 
     def _get_hedge_side_for_mode(self) -> TradeType:
         if self._closing:
-            # close side is opposite to initial
             return self._opposite_side(self.side_hedge)
         else:
             return self.side_hedge
-
-    # ========== Event handlers ==========
 
     def _market_name(self, market: ConnectorBase) -> str:
         return getattr(market, "name", None) or getattr(market, "connector_name", None) or ""
 
     def process_order_created_event(self, event_tag: int, market: ConnectorBase, event: Union[BuyOrderCreatedEvent, SellOrderCreatedEvent]):
-        # maker CLOSE ack
         if self._closing_current and event.order_id == self._closing_current.get("close_order_id"):
-            # set creation_ts if we can retrieve it from in_flight
             updated = None
             try:
                 updated = self.get_in_flight_order(self._market_name(market), event.order_id)
             except Exception:
                 pass
             if updated:
-                # record tracked for potential TTL timekeeping too
                 to = TrackedOrder(order_id=event.order_id)
                 to.order = updated
                 self._maker_by_id[event.order_id] = to
@@ -910,7 +801,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             self.logger().info(f"Maker CLOSE acknowledged id={event.order_id}")
             return
 
-        # normal map-based correlation
         to = self._maker_by_id.get(event.order_id) or self._hedge_by_id.get(event.order_id)
         if to:
             updated = None
@@ -921,16 +811,13 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             if updated:
                 to.order = updated
                 self.replace_order(to, is_maker=(to in self._maker_orders))
-        # if maker order was pending, clear it now
         self._maker_pending_ids.discard(event.order_id)
 
-        # continue hedging if capacity
         if event.order_id in self._hedge_inflight:
             self._try_hedge_accumulated()
 
     def process_order_filled_event(self, event_tag: int, market: ConnectorBase, event: OrderFilledEvent):
         mid_maker = self.get_price(self.maker_connector, self.maker_pair, PriceType.MidPrice)
-        # maker CLOSE fill
         if self._closing_current and event.order_id == self._closing_current.get("close_order_id"):
             filled_base = Decimal(str(event.amount))
             self._closing_current["executed_base"] = self._closing_current.get("executed_base", Decimal("0")) + filled_base
@@ -939,10 +826,8 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             self._try_hedge_accumulated()
             return
 
-        # maker OPEN fill
         mo = self._maker_by_id.get(event.order_id)
         if mo:
-            # Refresh tracked in-flight order so executed amounts remain accurate
             try:
                 updated = self.get_in_flight_order(self._market_name(market), event.order_id)
                 if updated:
@@ -956,22 +841,18 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             self._try_hedge_accumulated()
             return
 
-        # hedge fill fees
         if event.order_id in self._hedge_by_id:
             mid_hedge = self.get_price(self.hedge_connector, self.hedge_pair, PriceType.MidPrice)
             self._add_fee_quote(event.trade_fee, mid_hedge, self.hedge_pair)
 
     def process_order_completed_event(self, event_tag: int, market: ConnectorBase, event: Union[BuyOrderCompletedEvent, SellOrderCompletedEvent]):
-        # clear hedge inflight
         if event.order_id in self._hedge_inflight:
             self._hedge_inflight.discard(event.order_id)
             self._hedge_inflight_amounts.pop(event.order_id, None)
             self._try_hedge_accumulated()
 
-        # clear maker pending if any
         self._maker_pending_ids.discard(event.order_id)
 
-        # maker CLOSE completed
         if self._closing_current and event.order_id == self._closing_current.get("close_order_id"):
             open_id = self._closing_current.get("open_id")
             before = len(self._maker_orders)
@@ -991,11 +872,9 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                 self._next_order_ready_ts = self._strategy.current_timestamp + float(self.config.order_interval_sec)
             return
 
-        # maker OPEN completed
         if event.order_id in self._maker_by_id:
             remaining_cap = self.get_remaining_maker_cap()
             if remaining_cap <= 0:
-                # finalize any residual hedge and stop
                 self._finalize_hedge_tail()
                 self.close_type = CloseType.COMPLETED
                 self.stop()
@@ -1003,7 +882,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                 self._next_order_ready_ts = self._strategy.current_timestamp + float(self.config.order_interval_sec)
 
     def process_order_canceled_event(self, event_tag: int, market: ConnectorBase, event: OrderCancelledEvent):
-        # maker CLOSE canceled
         if self._closing and self._closing_current and event.order_id == self._closing_current.get("close_order_id"):
             placed = self._closing_current.get("placed_amount", Decimal("0"))
             executed = self._closing_current.get("executed_base", Decimal("0"))
@@ -1014,14 +892,11 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             else:
                 self.logger().info(f"Close order {event.order_id} canceled; nothing remaining to re-queue.")
             self._closing_current = None
-            # also clear in case it sat in pending
             self._maker_pending_ids.discard(event.order_id)
             return
 
-        # generic removes
         if event.order_id in self._maker_by_id:
             to = self._maker_by_id.get(event.order_id)
-            # refresh latest state if possible
             try:
                 updated = self.get_in_flight_order(self._market_name(market), event.order_id)
                 if updated:
@@ -1035,7 +910,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                 self.logger().info(f"Maker order {event.order_id} canceled with partial fill {exec_base}; keeping for exposure accounting.")
         elif event.order_id in self._hedge_by_id:
             to = self._hedge_by_id.get(event.order_id)
-            # refresh and keep if partially filled to preserve exposure calc
             try:
                 updated = self.get_in_flight_order(self._market_name(market), event.order_id)
                 if updated:
@@ -1048,7 +922,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             else:
                 self.logger().info(f"Hedge order {event.order_id} canceled with partial fill {exec_base}; keeping for exposure accounting.")
 
-        # hedge capacity free / maker pending clear
         self._hedge_inflight.discard(event.order_id)
         self._hedge_inflight_amounts.pop(event.order_id, None)
         self._maker_pending_ids.discard(event.order_id)
@@ -1057,14 +930,12 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         order_id = event.order_id
         err_msg = event.error_message or "unknown error"
 
-        # clear trackers
         self._maker_pending_ids.discard(order_id)
         attempted_hedge = self._hedge_inflight_amounts.pop(order_id, Decimal("0"))
         self._hedge_inflight.discard(order_id)
 
         handled = False
 
-        # handle maker CLOSE failure
         if self._closing_current and order_id == self._closing_current.get("close_order_id"):
             handled = True
             placed = self._closing_current.get("placed_amount", Decimal("0"))
@@ -1081,7 +952,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             cooldown = float(getattr(self.config, "post_place_cooldown_sec", 0.5))
             self._next_order_ready_ts = self._strategy.current_timestamp + cooldown
 
-        # handle maker OPEN failure
         maker_tracked = self._maker_by_id.get(order_id)
         if maker_tracked is not None:
             handled = True
@@ -1090,7 +960,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             cooldown = float(getattr(self.config, "post_place_cooldown_sec", 0.5))
             self._next_order_ready_ts = self._strategy.current_timestamp + cooldown
 
-        # handle hedge failure
         hedge_tracked = self._hedge_by_id.get(order_id)
         if hedge_tracked is not None:
             handled = True
@@ -1114,8 +983,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         if not handled:
             self.logger().warning(f"Order {order_id} failed ({err_msg}); no tracked state was updated.")
 
-    # ========== Metrics API ==========
-
     def get_cum_fees_quote(self) -> Decimal:
         return self._cum_fees_quote
 
@@ -1126,19 +993,106 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         return self._net_pnl_pct
 
     def get_custom_info(self) -> Dict:
+        maker_pos_base: Decimal = Decimal("0")
+        hedge_pos_base: Decimal = Decimal("0")
+        oriented_diff_pct: Optional[Decimal] = None
+        abs_diff_pct: Optional[Decimal] = None
+        entry_rate_sec: Optional[Decimal] = None
+        hedge_rate_sec: Optional[Decimal] = None
+        minutes_to_funding_entry: Optional[Decimal] = None
+        minutes_to_funding_hedge: Optional[Decimal] = None
+
+        try:
+            maker_pos_base = self._maker_remaining_exposure_base()
+        except Exception:
+            pass
+        try:
+            hedge_pos_base = self._hedge_remaining_exposure_base()
+        except Exception:
+            pass
+
+        try:
+            rates = self._get_normalized_funding_rates() or {}
+            entry_rate_sec = rates.get("entry")
+            hedge_rate_sec = rates.get("hedge")
+            hours = getattr(self.config, "funding_profitability_interval_hours", None)
+            abs_diff_pct = self._get_funding_diff_pct(funding_interval_hours=hours)
+            oriented_diff_pct = self._get_oriented_funding_diff_pct(funding_interval_hours=hours)
+        except Exception:
+            pass
+
+        try:
+            mdp = getattr(self._strategy, "market_data_provider", None)
+            if mdp is not None:
+                entry_fi = mdp.get_funding_info(self.maker_connector, self.maker_pair)
+                hedge_fi = mdp.get_funding_info(self.hedge_connector, self.hedge_pair)
+                now_ts = self._strategy.current_timestamp
+                if entry_fi is not None:
+                    minutes_to_funding_entry = util_minutes_to_next_funding(entry_fi.next_funding_utc_timestamp, now_ts)
+                if hedge_fi is not None:
+                    minutes_to_funding_hedge = util_minutes_to_next_funding(hedge_fi.next_funding_utc_timestamp, now_ts)
+        except Exception:
+            pass
+
+        try:
+            maker_open_orders = self._format_tracked_orders(self._maker_orders)
+        except Exception:
+            maker_open_orders = []
+        try:
+            hedge_open_orders = self._format_tracked_orders(self._hedge_orders)
+        except Exception:
+            hedge_open_orders = []
+
         return {
             "maker_connector": self.maker_connector,
             "maker_pair": self.maker_pair,
             "hedge_connector": self.hedge_connector,
             "hedge_pair": self.hedge_pair,
             "side": self.side_maker.name,
+            "maker_position_base": maker_pos_base,
+            "maker_position_quote": (maker_pos_base * self.get_price(self.maker_connector, self.maker_pair, PriceType.MidPrice)),
+            "hedge_position_base": hedge_pos_base,
+            "net_pnl_quote": self.get_net_pnl_quote(),
+            "net_pnl_pct": self.get_net_pnl_pct(),
+            "funding_pnl_quote_maker": self._cum_funding_maker_quote,
+            "funding_pnl_quote_hedge": self._cum_funding_hedge_quote,
+            "funding_pnl_quote_net": (self._cum_funding_maker_quote + self._cum_funding_hedge_quote),
+            "funding_pnl_quote": (self._cum_funding_maker_quote + self._cum_funding_hedge_quote),
+            "funding_entry_rate_sec": entry_rate_sec,
+            "funding_hedge_rate_sec": hedge_rate_sec,
+            "funding_diff_pct": abs_diff_pct,
+            "funding_oriented_diff_pct": oriented_diff_pct,
+            "minutes_to_funding_entry": minutes_to_funding_entry,
+            "minutes_to_funding_hedge": minutes_to_funding_hedge,
+            "maker_open_orders": maker_open_orders,
+            "hedge_open_orders": hedge_open_orders,
             "held_position_orders": [],
         }
 
-    # ========== Lifecycle ==========
+    def process_funding_payment_event(self, event_tag: int, market: ConnectorBase, event):
+        try:
+            self.logger().info(f"Funding event received: {event}")
+            market_name = self._market_name(market)
+            event_pair = getattr(event, "trading_pair", None)
+            if market_name == self.maker_connector and event_pair == self.maker_pair:
+                leg = "maker"
+            elif market_name == self.hedge_connector and event_pair == self.hedge_pair:
+                leg = "hedge"
+            else:
+                return
+            amount: Decimal = getattr(event, "amount", Decimal("0")) or Decimal("0")
+            if leg == "maker":
+                self._cum_funding_maker_quote += Decimal(str(amount))
+            else:
+                self._cum_funding_hedge_quote += Decimal(str(amount))
+            self._cum_funding_quote = self._cum_funding_maker_quote + self._cum_funding_hedge_quote
+            self.logger().info(
+                f"[Funding] {leg} {market_name}:{event.trading_pair} amount={amount} cum_maker={self._cum_funding_maker_quote} cum_hedge={self._cum_funding_hedge_quote} net={self._cum_funding_quote}"
+            )
+        except Exception as e:
+            self.logger().warning(f"Error processing funding event: {e}")
 
     def close_all_positions_by_market(self):
-        # Use net exposure (OPEN - CLOSE) to compute amounts, so partial fills on canceled orders are not lost
         maker_exposure = self._maker_remaining_exposure_base()
         hedge_exposure = self._hedge_remaining_exposure_base()
         self.logger().info(f"Closing maker position via market: {maker_exposure} {self.maker_pair}")

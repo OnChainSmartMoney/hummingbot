@@ -446,9 +446,16 @@ class StrategyV2Base(ScriptStrategyBase):
             # Controller status
             lines.extend(controller.to_format_status())
 
-            # Last 6 executors table
+            controller_config = controller.config
+            controller_name = getattr(controller_config, 'controller_name', None)
+
+            should_show_executors_or_positions = True
+            if controller_name == "funding_rate_arb_controller":
+                should_show_executors_or_positions = False
+
+            # Last 6 executors table, disabled for now
             executors_list = self.get_executors_by_controller(controller_id)
-            if executors_list:
+            if executors_list and should_show_executors_or_positions:
                 lines.append("\n  Recent Executors (Last 6):")
                 # Sort by timestamp and take last 6
                 recent_executors = sorted(executors_list, key=lambda x: x.timestamp, reverse=True)[:6]
@@ -460,12 +467,12 @@ class StrategyV2Base(ScriptStrategyBase):
                     available_columns = [col for col in executor_columns if col in executors_df.columns]
                     lines.append(format_df_for_printout(executors_df[available_columns],
                                                         table_format="psql", index=False))
-            else:
+            elif should_show_executors_or_positions:
                 lines.append("  No executors found.")
 
             # Positions table
             positions = self.get_positions_by_controller(controller_id)
-            if positions:
+            if positions and should_show_executors_or_positions:
                 lines.append("\n  Positions Held:")
                 positions_data = []
                 for pos in positions:
@@ -482,7 +489,7 @@ class StrategyV2Base(ScriptStrategyBase):
                     })
                 positions_df = pd.DataFrame(positions_data)
                 lines.append(format_df_for_printout(positions_df, table_format="psql", index=False))
-            else:
+            elif should_show_executors_or_positions:
                 lines.append("  No positions held.")
 
             # Collect performance data for summary table

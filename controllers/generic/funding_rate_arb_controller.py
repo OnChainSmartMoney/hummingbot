@@ -83,11 +83,6 @@ class FundingRateArbControllerConfig(ControllerConfigBase):
 
 
 class FundingRateArbController(ControllerBase):
-    """
-    Minimal working controller skeleton that proposes a Maker+Hedge single-executor
-    when there is no active executor for a pair. Edge/liquidity checks are placeholders.
-    """
-
     FUNDING_INTERVAL_FALLBACKS: Dict[str, int] = {
         "bybit_perpetual": 60 * 60 * 8,
         "hyperliquid_perpetual": 60 * 60 * 1,
@@ -110,7 +105,6 @@ class FundingRateArbController(ControllerBase):
             if len(connectors) < 2:
                 continue
 
-            # If any active executor already uses this base across any connector combination, skip computing new metrics
             active_for_base = False
             for ei in self.executors_info:
                 if not ei.is_active or ei.is_done:
@@ -129,7 +123,6 @@ class FundingRateArbController(ControllerBase):
             if active_for_base:
                 continue
 
-            # Warm mid prices for all connector/trading-pair combinations
             for connector_name in connectors:
                 quote = pair_config.per_exchange_quote.get(connector_name)
                 if not quote:
@@ -191,10 +184,6 @@ class FundingRateArbController(ControllerBase):
         self.processed_data["pair_metrics"] = pair_metrics
 
     def _get_available_connectors_for_pair(self, pair_config: PairConfig) -> List[str]:
-        """
-        Return list of connectors from global config that have a quote asset defined for this pair's base.
-        Filters out connectors missing quotes or with empty strings.
-        """
         connectors: List[str] = []
         for connector_name in self.config.connectors:
             quote = pair_config.per_exchange_quote.get(connector_name)
@@ -203,7 +192,6 @@ class FundingRateArbController(ControllerBase):
         return connectors
 
     def _count_active_groups_for_base(self, base: str) -> int:
-        """Counts active executors (maker legs) whose trading pair base matches given base symbol."""
         count = 0
         for ei in self.executors_info:
             if not ei.is_active or ei.is_done:
@@ -234,7 +222,6 @@ class FundingRateArbController(ControllerBase):
         actions: List[ExecutorAction] = []
         pair_metrics_map: Dict[tuple, Dict] = self.processed_data.get("pair_metrics", {})
 
-        # Track active global allocation from running executors to not exceed total_notional_usd
         active_alloc_usd = Decimal("0")
         for ei in self.filter_executors(self.executors_info, lambda e: e.is_active and not e.is_done):
             cfg = ei.config
@@ -344,7 +331,7 @@ class FundingRateArbController(ControllerBase):
 
                 self._last_entry_ts_by_pair[cooldown_key] = now_ts
                 active_alloc_usd += pair_cap_usd
-                break  # create at most one executor per pair per cycle
+                break
         return actions
 
     def _select_quote_volume(self, pair_config: PairConfig) -> Optional[Decimal]:
@@ -364,7 +351,6 @@ class FundingRateArbController(ControllerBase):
         rate = funding_info.rate
         interval = funding_info.funding_interval
         self.logger().info(f"Details - trading_pair: {trade_pair}, rate: {rate}, interval: {interval}")
-        # Delegate to shared utility with controller-specific fallbacks
         return util_normalized_funding_rate_in_seconds(
             funding_info=funding_info,
             connector=connector,
@@ -414,7 +400,6 @@ class FundingRateArbController(ControllerBase):
             return metrics
 
         interval_hours = self.config.signal.funding_profitability_interval_hours or self.DEFAULT_FUNDING_PROFITABILITY_INTERVAL_HOURS
-        # Use shared util to compute human percent over the configured horizon
         diff_pct_signed = util_funding_diff_pct(entry_rate_sec, hedge_rate_sec, hours=int(interval_hours))
         funding_rate_diff_pct = abs(Decimal(str(diff_pct_signed))) if diff_pct_signed is not None else None
 
@@ -452,128 +437,92 @@ class FundingRateArbController(ControllerBase):
                 formatted = formatted.rstrip("0").rstrip(".")
             return formatted or "0"
 
-        def _format_price(price) -> str:
-            numeric = Decimal(str(price))
-            if numeric.is_nan():
-                return "NaN"
-            return f"{numeric:.6f}"
-
-        summary_rows = []
-        executor_rows = []
-        order_rows = []
-        pair_metrics_map: Dict[tuple, Dict] = self.processed_data.get("pair_metrics", {})
-
-        for p in self.config.pairs:
-            connectors = self._get_available_connectors_for_pair(p)
-            if len(connectors) < 2:
-                continue
-
-            # Build rows for every metrics combination we computed for this base
-            for (base, entry_ex, entry_tp, hedge_ex, hedge_tp), metrics in pair_metrics_map.items():
-                if base != p.base:
-                    continue
-                if entry_ex not in connectors or hedge_ex not in connectors:
-                    continue
-                maker_mid_raw = self.market_data_provider.get_price_by_type(entry_ex, entry_tp, PriceType.MidPrice)
-                hedge_mid_raw = self.market_data_provider.get_price_by_type(hedge_ex, hedge_tp, PriceType.MidPrice)
-
-                funding_rate_diff_pct = metrics.get("funding_rate_diff_pct")
-                trade_side_metric = metrics.get("trade_side")
-                entry_minutes_to_funding = metrics.get("entry_minutes_to_funding")
-                hedge_minutes_to_funding = metrics.get("hedge_minutes_to_funding")
-                quote_volume = metrics.get("quote_volume")
-
-                # Collect executors whose maker leg matches this entry pair+connector
-                relevant_executors = []
-                for ei in self.executors_info:
-                    config = getattr(ei, "config", None)
-                    maker_market = getattr(config, "maker_market", None)
-                    hedge_market = getattr(config, "hedge_market", None)
-                    if maker_market and hedge_market:
-                        if maker_market.connector_name == entry_ex and maker_market.trading_pair == entry_tp and \
-                                hedge_market.connector_name == hedge_ex and hedge_market.trading_pair == hedge_tp:
-                            relevant_executors.append(ei)
-
-                total_maker_pos = Decimal("0")
-                total_hedge_pos = Decimal("0")
-                total_open_orders = 0
-
-                for ei in relevant_executors:
-                    info = getattr(ei, "custom_info", {}) or {}
-                    maker_pos = _to_decimal(info.get("maker_position_base", "0"))
-                    hedge_pos = _to_decimal(info.get("hedge_position_base", "0"))
-                    total_maker_pos += maker_pos
-                    total_hedge_pos += hedge_pos
-
-                    maker_orders = info.get("maker_open_orders", []) or []
-                    hedge_orders = info.get("hedge_open_orders", []) or []
-                    total_open_orders += len(maker_orders) + len(hedge_orders)
-
-                    executor_rows.append({
-                        "pair": p.base,
-                        "executor": ei.id,
-                        "status": getattr(ei.status, "name", str(ei.status)),
-                        "side": info.get("side", "-"),
-                        "maker_pos": _decimal_to_str(maker_pos),
-                        "hedge_pos": _decimal_to_str(hedge_pos),
-                        "orders": len(maker_orders) + len(hedge_orders),
-                        "net_pnl_quote": _decimal_to_str(ei.net_pnl_quote),
-                        "net_pnl_pct": _decimal_to_str(ei.net_pnl_pct),
-                    })
-
-                    for order in maker_orders:
-                        order_rows.append({
-                            "pair": p.base,
-                            "executor": ei.id,
-                            "leg": "maker",
-                            "order_id": order.get("id"),
-                            "side": order.get("side"),
-                            "price": order.get("px"),
-                            "amount": order.get("amt"),
-                            "filled": order.get("exec_base"),
-                            "state": order.get("state"),
-                        })
-
-                    for order in hedge_orders:
-                        order_rows.append({
-                            "pair": p.base,
-                            "executor": ei.id,
-                            "leg": "hedge",
-                            "order_id": order.get("id"),
-                            "side": order.get("side"),
-                            "price": order.get("px"),
-                            "amount": order.get("amt"),
-                            "filled": order.get("exec_base"),
-                            "state": order.get("state"),
-                        })
-
-                summary_rows.append({
-                    "pair": f"{p.base}",
-                    "entry": f"{entry_ex}:{entry_tp}",
-                    "hedge": f"{hedge_ex}:{hedge_tp}",
-                    "maker_mid": _format_price(maker_mid_raw),
-                    "hedge_mid": _format_price(hedge_mid_raw),
-                    "active_exec": sum(1 for ei in relevant_executors if ei.is_active),
-                    "maker_pos": _decimal_to_str(total_maker_pos),
-                    "hedge_pos": _decimal_to_str(total_hedge_pos),
-                    "open_orders": total_open_orders,
-                    "funding_diff_%": _decimal_to_str(funding_rate_diff_pct) if funding_rate_diff_pct is not None else "-",
-                    "side": getattr(trade_side_metric, "name", "-"),
-                    "quote_notional": _decimal_to_str(quote_volume) if quote_volume is not None else "-",
-                    "min_to_funding_entry": _decimal_to_str(entry_minutes_to_funding) if entry_minutes_to_funding is not None else "-",
-                    "min_to_funding_hedge": _decimal_to_str(hedge_minutes_to_funding) if hedge_minutes_to_funding is not None else "-",
-                })
-
-        if not summary_rows:
-            return ["No pairs configured."]
+        def _to_int(value) -> int:
+            if value is None:
+                return 0
+            return int(value)
 
         outputs: List[str] = []
-        summary_df = pd.DataFrame(summary_rows)
-        outputs.append("Active pairs summary:\n" + format_df_for_printout(summary_df, table_format="psql", index=False))
+        exec_rows: List[Dict[str, Any]] = []
+        order_rows: List[Dict[str, Any]] = []
 
-        if executor_rows:
-            executor_df = pd.DataFrame(executor_rows)
-            outputs.append("Active executors:\n" + format_df_for_printout(executor_df, table_format="psql", index=False))
+        for ei in self.executors_info:
+            if not ei.is_active:
+                continue
+            cfg = getattr(ei, "config", None)
+            info = getattr(ei, "custom_info", {}) or {}
+
+            maker_market = getattr(cfg, "maker_market", None)
+            hedge_market = getattr(cfg, "hedge_market", None)
+            if not maker_market or not hedge_market:
+                self.logger().info(f"Executor {ei.id} missing market info")
+                continue
+
+            entry_ex = maker_market.connector_name
+            entry_tp = maker_market.trading_pair
+            hedge_ex = hedge_market.connector_name
+            hedge_tp = hedge_market.trading_pair
+
+            maker_pos = _to_decimal(info.get("maker_position_base", "0"))
+            maker_pos_quote = _to_decimal(info.get("maker_position_quote", "0"))
+            hedge_pos = _to_decimal(info.get("hedge_position_base", "0"))
+            net_pnl_quote = _to_decimal(info.get("net_pnl_quote", ei.net_pnl_quote))
+            net_pnl_pct = _to_decimal(info.get("net_pnl_pct", ei.net_pnl_pct))
+            funding_pnl_maker = _to_decimal(info.get("funding_pnl_quote_maker", info.get("funding_pnl_quote", 0)))
+            funding_pnl_hedge = _to_decimal(info.get("funding_pnl_quote_hedge", 0))
+            funding_pnl_net = _to_decimal(info.get("funding_pnl_quote_net", funding_pnl_maker + funding_pnl_hedge))
+
+            oriented_diff = info.get("funding_oriented_diff_pct")
+
+            min_to_funding_entry = info.get("minutes_to_funding_entry")
+            min_to_funding_hedge = info.get("minutes_to_funding_hedge")
+
+            exec_rows.append({
+                "Entry": f"{entry_ex}:{entry_tp}",
+                "Hedge": f"{hedge_ex}:{hedge_tp}",
+                "Status": getattr(ei.status, "name", str(ei.status)),
+                "Side": info.get("side", "-"),
+                "Maker pos": _decimal_to_str(maker_pos),
+                "Hedge pos": _decimal_to_str(hedge_pos),
+                "Maker pos $": _decimal_to_str(maker_pos_quote),
+                "Net pnl quote": _decimal_to_str(net_pnl_quote),
+                "Net pnl %": _decimal_to_str(net_pnl_pct),
+                "Funding pnl maker": _decimal_to_str(funding_pnl_maker),
+                "Funding pnl hedge": _decimal_to_str(funding_pnl_hedge),
+                "Funding pnl net": _decimal_to_str(funding_pnl_net),
+                "Funding diff %": _decimal_to_str(oriented_diff) if oriented_diff is not None else "-",
+                "Min entry fund": _to_int(min_to_funding_entry) if min_to_funding_entry is not None else "-",
+                "Min hedge fund": _to_int(min_to_funding_hedge) if min_to_funding_hedge is not None else "-",
+            })
+
+            maker_orders = info.get("maker_open_orders", []) or []
+            hedge_orders = info.get("hedge_open_orders", []) or []
+            for order in maker_orders:
+                order_rows.append({
+                    "Connector": entry_ex,
+                    "Trading Pair": entry_tp,
+                    "Side": order.get("side"),
+                    "Price": order.get("px"),
+                    "Amount": order.get("amt"),
+                    "Filled": order.get("exec_base"),
+                    "State": order.get("state"),
+                })
+            for order in hedge_orders:
+                order_rows.append({
+                    "Connector": hedge_ex,
+                    "Trading Pair": hedge_tp,
+                    "Side": order.get("side"),
+                    "Price": order.get("px"),
+                    "Amount": order.get("amt"),
+                    "Filled": order.get("exec_base"),
+                    "State": order.get("state"),
+                })
+
+        if not exec_rows:
+            return ["No active executors."]
+
+        exec_df = pd.DataFrame(exec_rows)
+        outputs.append("Active executors:\n" + format_df_for_printout(exec_df, table_format="psql", index=False))
 
         if order_rows:
             orders_df = pd.DataFrame(order_rows)

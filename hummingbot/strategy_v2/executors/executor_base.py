@@ -11,6 +11,7 @@ from hummingbot.core.event.event_forwarder import SourceInfoEventForwarder
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
     BuyOrderCreatedEvent,
+    FundingPaymentCompletedEvent,
     MarketEvent,
     MarketOrderFailureEvent,
     OrderCancelledEvent,
@@ -56,6 +57,7 @@ class ExecutorBase(RunnableBase):
         self._complete_sell_order_forwarder = SourceInfoEventForwarder(self.process_order_completed_event)
         self._cancel_order_forwarder = SourceInfoEventForwarder(self.process_order_canceled_event)
         self._failed_order_forwarder = SourceInfoEventForwarder(self.process_order_failed_event)
+        self._funding_payment_forwarder = SourceInfoEventForwarder(self.process_funding_payment_event)
 
         # Pairs of market events and their corresponding event forwarders
         self._event_pairs: List[Tuple[MarketEvent, SourceInfoEventForwarder]] = [
@@ -66,6 +68,7 @@ class ExecutorBase(RunnableBase):
             (MarketEvent.BuyOrderCompleted, self._complete_buy_order_forwarder),
             (MarketEvent.SellOrderCompleted, self._complete_sell_order_forwarder),
             (MarketEvent.OrderFailure, self._failed_order_forwarder),
+            (MarketEvent.FundingPaymentCompleted, self._funding_payment_forwarder),
         ]
 
     @property
@@ -413,5 +416,18 @@ class ExecutorBase(RunnableBase):
         :param event_tag: The event tag.
         :param market: The market where the event occurred.
         :param event: The event.
+        """
+        pass
+
+    def process_funding_payment_event(self,
+                                      event_tag: int,
+                                      market: ConnectorBase,
+                                      event: FundingPaymentCompletedEvent):
+        """
+        Processes the funding payment completed event. Subclasses can override to track realized funding PnL.
+
+        :param event_tag: The event tag.
+        :param market: The market where the event occurred.
+        :param event: The funding payment event.
         """
         pass
