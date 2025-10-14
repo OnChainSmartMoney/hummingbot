@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
@@ -96,6 +97,38 @@ class FundingRateArbController(ControllerBase):
         super().__init__(config, *args, **kwargs)
         self.config: FundingRateArbControllerConfig
         self._last_entry_ts_by_pair = {}
+        self._base_stop_ts: Dict[str, float] = {}
+        self._stop_cooldown_sec: int = 300
+
+        try:
+            prefix = "[Controller]"
+
+            class _PrefixFilter(logging.Filter):
+                def __init__(self, p: str):
+                    super().__init__()
+                    self._p = p
+
+                def filter(self, record: logging.LogRecord) -> bool:
+                    try:
+                        msg = record.msg
+                        if isinstance(msg, str):
+                            if not msg.startswith(self._p):
+                                record.msg = f"{self._p} {msg}"
+                        else:
+                            record.msg = f"{self._p} {msg}"
+                    except Exception:
+                        pass
+                    return True
+
+            instance_logger_name = f"{__name__}.{id(self)}"
+            inst_logger = logging.getLogger(instance_logger_name)
+            if not any(isinstance(flt, _PrefixFilter) for flt in getattr(inst_logger, 'filters', [])):
+                inst_logger.addFilter(_PrefixFilter(prefix))
+            self._prefixed_logger = inst_logger
+            self.logger = lambda: self._prefixed_logger
+        except Exception:
+            self._prefixed_logger = logging.getLogger(__name__)
+            self.logger = lambda: self._prefixed_logger
 
     async def update_processed_data(self):
         pair_metrics: Dict[tuple, Dict] = {}
@@ -169,17 +202,8 @@ class FundingRateArbController(ControllerBase):
                         hedge_rate_pct_for_funding_interval_hours_str = f"{hedge_rate_pct_for_funding_interval_hours:.6f}"
                         funding_diff_str = "n/a" if funding_rate_diff_pct is None else f"{funding_rate_diff_pct:.6f}"
                         trade_side = metrics.get("trade_side")
-                        quote_volume = metrics.get("quote_volume")
                         self.logger().info(
-                            "[FUNDING] %s entry=%s rate/interval=%s hedge=%s rate/interval=%s diff=%s side=%s quote_notional=%s",
-                            pair_config.base,
-                            f"{entry_ex}:{entry_tp}",
-                            entry_rate_pct_for_funding_interval_hours_str,
-                            f"{hedge_ex}:{hedge_tp}",
-                            hedge_rate_pct_for_funding_interval_hours_str,
-                            funding_diff_str,
-                            getattr(trade_side, "name", "-"),
-                            str(quote_volume) if quote_volume is not None else "-",
+                            f"[Funding] base={pair_config.base} entry={entry_ex} rate_int={entry_rate_pct_for_funding_interval_hours_str} hedge={hedge_ex} rate_int={hedge_rate_pct_for_funding_interval_hours_str} diff={funding_diff_str} side={getattr(trade_side, 'name', '-')}"
                         )
 
         self.processed_data["pair_metrics"] = pair_metrics
@@ -223,6 +247,15 @@ class FundingRateArbController(ControllerBase):
         actions: List[ExecutorAction] = []
         pair_metrics_map: Dict[tuple, Dict] = self.processed_data.get("pair_metrics", {})
 
+        now_ts_global = self.market_data_provider.time()
+
+        for ei in self.executors_info:
+            if ei.is_done and getattr(ei, "trading_pair", None):
+                tp = ei.trading_pair
+                if tp and "-" in tp:
+                    base = tp.split("-", 1)[0]
+                    self._base_stop_ts.setdefault(base, now_ts_global)
+
         active_alloc_usd = Decimal("0")
         for ei in self.filter_executors(self.executors_info, lambda e: e.is_active and not e.is_done):
             cfg = ei.config
@@ -233,6 +266,12 @@ class FundingRateArbController(ControllerBase):
         for pair_config in self.config.pairs:
             connectors = self._get_available_connectors_for_pair(pair_config)
             if len(connectors) < 2:
+                continue
+
+            stop_ts = self._base_stop_ts.get(pair_config.base)
+            if stop_ts is not None and (now_ts_global - stop_ts) < self._stop_cooldown_sec:
+                remain = int(self._stop_cooldown_sec - (now_ts_global - stop_ts))
+                self.logger().info(f"[Skip] cooldown after stop base={pair_config.base} remain={remain}s")
                 continue
 
             max_groups = getattr(self.config.risk, "max_groups_per_pair", None)
@@ -265,37 +304,31 @@ class FundingRateArbController(ControllerBase):
 
                 funding_rate_diff_pct = metrics.get("funding_rate_diff_pct")
                 if funding_rate_diff_pct is None:
-                    self.logger().info("[SKIP] %s %s->%s funding diff unavailable", entry_tp, entry_ex, hedge_ex)
+                    self.logger().info(f"[Skip] funding diff unavailable {entry_tp} {entry_ex}->{hedge_ex}")
                     continue
 
-                # Compare in percent units (e.g., 0.02 means 0.02%)
                 if funding_rate_diff_pct < self.config.signal.min_funding_rate_profitability_pct:
                     self.logger().info(
-                        "[SKIP] %s %s->%s funding diff pct=%s below threshold pct=%s",
-                        entry_tp,
-                        entry_ex,
-                        hedge_ex,
-                        f"{funding_rate_diff_pct:.6f}",
-                        f"{self.config.signal.min_funding_rate_profitability_pct:.6f}",
+                        f"[Skip] below threshold {entry_tp} {entry_ex}->{hedge_ex} diff={funding_rate_diff_pct:.6f} threshold={self.config.signal.min_funding_rate_profitability_pct:.6f}"
                     )
                     continue
 
                 active_for_pair = self.get_active_executors_for_trading_pair(entry_tp)
                 if any(not ei.is_done for ei in active_for_pair):
-                    self.logger().info(f"[SKIP] {entry_tp} {entry_ex}->{hedge_ex} already has active executor")
+                    self.logger().info(f"[Skip] already active {entry_tp} {entry_ex}->{hedge_ex}")
                     continue
 
                 now_ts = self.market_data_provider.time()
                 cooldown_key = (entry_ex, entry_tp)
                 last_ts = self._last_entry_ts_by_pair.get(cooldown_key, 0)
                 if now_ts - last_ts < self.config.execution.entry_cooldown_sec:
-                    self.logger().info(f"[SKIP] {entry_tp} {entry_ex}->{hedge_ex} in cooldown")
+                    self.logger().info(f"[Skip] cooldown {entry_tp} {entry_ex}->{hedge_ex}")
                     continue
 
-                self.logger().info(f"cooldown check passed for {entry_tp} {entry_ex}->{hedge_ex}")
+                self.logger().info(f"[Check] cooldown passed {entry_tp} {entry_ex}->{hedge_ex}")
                 pair_cap_usd: Decimal = pair_config.total_notional_usd_per_pair if pair_config.total_notional_usd_per_pair > 0 else self.config.execution.total_notional_usd
                 if active_alloc_usd + pair_cap_usd > self.config.execution.total_notional_usd:
-                    self.logger().info(f"[SKIP] {entry_tp} {entry_ex}->{hedge_ex} would exceed total allocation")
+                    self.logger().info(f"[Skip] allocation exceed {entry_tp} {entry_ex}->{hedge_ex}")
                     continue
 
                 maker_side = metrics.get("trade_side", TradeType.BUY)
@@ -322,13 +355,7 @@ class FundingRateArbController(ControllerBase):
 
                 actions.append(CreateExecutorAction(executor_config=exec_cfg, controller_id=self.config.id))
                 self.logger().info(
-                    "[ENTER] %s %s->%s exec side=%s funding diff pct=%s cap_usd=%s",
-                    entry_tp,
-                    entry_ex,
-                    hedge_ex,
-                    maker_side.name,
-                    f"{funding_rate_diff_pct:.6f}" if funding_rate_diff_pct is not None else "n/a",
-                    f"{pair_cap_usd:.2f}",
+                    f"[Enter] {entry_tp} {entry_ex}->{hedge_ex} side={maker_side.name} diff={(f'{funding_rate_diff_pct:.6f}' if funding_rate_diff_pct is not None else 'n/a')} cap_usd={pair_cap_usd:.2f}"
                 )
 
                 self._last_entry_ts_by_pair[cooldown_key] = now_ts
@@ -336,23 +363,7 @@ class FundingRateArbController(ControllerBase):
                 break
         return actions
 
-    def _select_quote_volume(self, pair_config: PairConfig) -> Optional[Decimal]:
-        candidates = [
-            pair_config.max_notional_per_part,
-            pair_config.total_notional_usd_per_pair,
-            self.config.execution.total_notional_usd,
-        ]
-        for candidate in candidates:
-            candidate_dec = Decimal(str(candidate))
-            if candidate_dec > 0:
-                return candidate_dec
-        return None
-
     def _normalized_funding_rate_in_seconds(self, funding_info, connector: str) -> Optional[Decimal]:
-        trade_pair = funding_info.trading_pair
-        rate = funding_info.rate
-        interval = funding_info.funding_interval
-        self.logger().info(f"Details - trading_pair: {trade_pair}, rate: {rate}, interval: {interval}")
         return util_normalized_funding_rate_in_seconds(
             funding_info=funding_info,
             connector=connector,
@@ -379,21 +390,20 @@ class FundingRateArbController(ControllerBase):
             "hedge_rate_sec": None,
             "entry_minutes_to_funding": None,
             "hedge_minutes_to_funding": None,
-            "quote_volume": None,
         }
 
         entry_funding = self.market_data_provider.get_funding_info(entry_connector, entry_trading_pair)
-        self.logger().debug(f"Entry funding info: {entry_funding}")
+        if entry_funding is None:
+            self.logger().info(f"[Funding] entry funding missing {entry_connector}:{entry_trading_pair}")
         hedge_funding = self.market_data_provider.get_funding_info(hedge_connector, hedge_trading_pair)
-        self.logger().debug(f"Hedge funding info: {hedge_funding}")
+        if hedge_funding is None:
+            self.logger().info(f"[Funding] hedge funding missing {hedge_connector}:{hedge_trading_pair}")
 
         if entry_funding is None or hedge_funding is None:
             return metrics
 
         entry_rate_sec = self._normalized_funding_rate_in_seconds(entry_funding, entry_connector)
-        self.logger().debug(f"Entry rate (sec): {entry_rate_sec}")
         hedge_rate_sec = self._normalized_funding_rate_in_seconds(hedge_funding, hedge_connector)
-        self.logger().debug(f"Hedge rate (sec): {hedge_rate_sec}")
 
         metrics["entry_rate_sec"] = entry_rate_sec
         metrics["hedge_rate_sec"] = hedge_rate_sec
@@ -412,13 +422,10 @@ class FundingRateArbController(ControllerBase):
         metrics["entry_minutes_to_funding"] = self._minutes_to_next_funding(entry_funding.next_funding_utc_timestamp, current_ts)
         metrics["hedge_minutes_to_funding"] = self._minutes_to_next_funding(hedge_funding.next_funding_utc_timestamp, current_ts)
 
-        quote_volume = self._select_quote_volume(pair_config)
-        metrics["quote_volume"] = quote_volume
-
         return metrics
 
     def on_stop(self):
-        self.logger().info("FundingRateArbController stopping. Current open positions:")
+        self.logger().info("[Stop] FundingRateArbController stopping. Current open positions:")
         return super().on_stop()
 
     def to_format_status(self) -> List[str]:
@@ -457,7 +464,7 @@ class FundingRateArbController(ControllerBase):
             maker_market = getattr(cfg, "maker_market", None)
             hedge_market = getattr(cfg, "hedge_market", None)
             if not maker_market or not hedge_market:
-                self.logger().info(f"Executor {ei.id} missing market info")
+                self.logger().warning(f"[Exec] missing market info id={ei.id}")
                 continue
 
             entry_ex = maker_market.connector_name
