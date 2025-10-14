@@ -86,19 +86,26 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         self._funding_last_diff_pct: Optional[Decimal] = None
         self._funding_exit_triggered: bool = False
 
+        self._is_profitable_on_last_check: Optional[bool] = None
+        self._last_profitable_ts: float = 0.0
+
         super().__init__(strategy=strategy, connectors=[self.maker_connector, self.hedge_connector], config=config, update_interval=update_interval)
 
     async def on_start(self):
         self.logger().info(
             f"Executor start: entry={self.maker_connector}:{self.maker_pair} hedge={self.hedge_connector}:{self.hedge_pair} side={self.side_maker.name}"
         )
+        self._desired_hedge_position_mode: PositionMode = (
+            PositionMode.ONEWAY if self.hedge_connector == "hyperliquid_perpetual" else PositionMode.HEDGE
+        )
         try:
-            position_mode = PositionMode.ONEWAY if self.hedge_connector == "hyperliquid_perpetual" else PositionMode.HEDGE
-            if position_mode != PositionMode.HEDGE:
+            if self._desired_hedge_position_mode == PositionMode.HEDGE:
                 self._strategy.set_position_mode(self.hedge_connector, PositionMode.HEDGE)
                 self.logger().info(f"Requested HEDGE position mode on {self.hedge_connector}")
+            else:
+                self.logger().info(f"Using ONEWAY position mode on {self.hedge_connector}")
         except Exception as e:
-            self.logger().warning(f"Could not request HEDGE position mode on {self.hedge_connector}: {e}")
+            self.logger().warning(f"Could not request {self._desired_hedge_position_mode.name} position mode on {self.hedge_connector}: {e}")
         await super().on_start()
 
     def add_order(self, order: TrackedOrder, is_maker: bool):
@@ -289,12 +296,18 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                 f"Insufficient {quote} margin: need {required_margin:.6f} (next_notional {next_notional_usd:.6f}/lev {leverage}), have {avail_quote:.6f}."
             )
 
+    def is_any_position_open(self) -> bool:
+        pos_maker = self.get_full_position_base_amount(is_maker=True)
+        pos_hedge = self.get_full_position_base_amount(is_maker=False)
+        return (pos_maker > 0) or (pos_hedge > 0)
+
     async def control_task(self):
         if self.status == RunnableStatus.RUNNING:
             try:
                 hedge_market = self._strategy.connectors[self.hedge_connector]
                 mode = getattr(hedge_market, "position_mode", None)
-                if mode != PositionMode.HEDGE:
+                desired_mode = getattr(self, "_desired_hedge_position_mode", PositionMode.HEDGE)
+                if desired_mode == PositionMode.HEDGE and mode != PositionMode.HEDGE:
                     try:
                         self._strategy.set_position_mode(self.hedge_connector, PositionMode.HEDGE)
                     except Exception:
@@ -328,6 +341,9 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             now = self._strategy.current_timestamp
 
             if self._opening_fully_completed and not self._closing:
+                if not self.is_any_position_open():
+                    self.early_stop()
+                    return
                 self._monitor_funding_and_maybe_trigger_exit(now)
                 return
 
@@ -635,9 +651,51 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                         amount = adjusted
                 except Exception:
                     pass
+        if amount <= 0:
+            self.logger().info("Computed order amount <= 0; skipping")
+            self._opening_fully_completed = True
+            return
 
         is_profitability_check_passed = self._check_profitability_enter_condition(maker_side, px, amount)
         self.logger().info(f"Placing maker {mode_desc} qty={amount} @ {px:.8f} (profitability check: {'pass' if is_profitability_check_passed else 'fail'})")
+
+        now_ts = int(self._strategy.current_timestamp)
+        wait_sec = float(getattr(self.config, "non_profitable_wait_sec", 60.0))
+
+        if not hasattr(self, "_is_profitable_on_last_check"):
+            self._is_profitable_on_last_check = True
+        if not hasattr(self, "_last_profitable_ts") or not self._last_profitable_ts:
+            self._last_profitable_ts = now_ts
+
+        if not is_profitability_check_passed:
+            elapsed = now_ts - self._last_profitable_ts
+
+            if not self._is_profitable_on_last_check:
+                if elapsed >= wait_sec:
+                    if not self.is_any_position_open():
+                        self.logger().info(
+                            f"Pair {self.maker_pair} non-profitable wait time exceeded ({elapsed:.0f}s >= {wait_sec:.0f}s); no open orders, stopping executor."
+                        )
+                        self.early_stop()
+                        return
+                    self._opening_fully_completed = True
+                    self.logger().info(
+                        f"Pair {self.maker_pair} non-profitable wait time exceeded ({elapsed:.0f}s >= {wait_sec:.0f}s); entering funding monitoring."
+                    )
+                else:
+                    self.logger().info(
+                        f"Pair {self.maker_pair} still not profitable; waiting {wait_sec - elapsed:.0f}s more."
+                    )
+                return
+
+            self._is_profitable_on_last_check = False
+            self.logger().info(
+                f"Pair {self.maker_pair} not profitable; starting wait window {wait_sec:.0f}s."
+            )
+            return
+
+        self._is_profitable_on_last_check = True
+        self._last_profitable_ts = now_ts
 
         order_id = self.place_order(
             connector_name=self.maker_connector,

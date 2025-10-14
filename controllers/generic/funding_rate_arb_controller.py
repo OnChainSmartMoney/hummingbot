@@ -50,6 +50,7 @@ class ExecutionConfig(BaseModel):
     entry_cooldown_sec: int = 120
     maker: MakerConfig = MakerConfig()
     hedge: HedgeConfig = HedgeConfig()
+    non_profitable_wait_sec: int = 60
 
 
 class RiskConfig(BaseModel):
@@ -316,6 +317,7 @@ class FundingRateArbController(ControllerBase):
                     exit_funding_diff_pct_threshold=self.config.exit.fr_spread_below_pct,
                     exit_hold_below_sec=self.config.exit.hold_below_sec,
                     funding_profitability_interval_hours=self.config.signal.funding_profitability_interval_hours,
+                    non_profitable_wait_sec=self.config.execution.non_profitable_wait_sec,
                 )
 
                 actions.append(CreateExecutorAction(executor_config=exec_cfg, controller_id=self.config.id))
