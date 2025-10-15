@@ -87,6 +87,9 @@ class MakerHedgeSingleExecutor(ExecutorBase):
 
         self._opening_fully_completed: bool = False
 
+        self._start_ts: Optional[float] = None
+        self._last_fill_ts: Optional[float] = None
+
         self._funding_helper: Optional[FundingHelper] = None
         self._profitability_helper: Optional[ProfitabilityHelper] = None
         self._hedge_helper: Optional[HedgeHelper] = None
@@ -98,13 +101,9 @@ class MakerHedgeSingleExecutor(ExecutorBase):
 
         super().__init__(strategy=strategy, connectors=[self.maker_connector, self.hedge_connector], config=config, update_interval=update_interval)
 
-        try:
-            base_coin = (self.maker_pair.split("-")[0] if isinstance(self.maker_pair, str) and "-" in self.maker_pair else str(self.maker_pair))
-            self._prefixed_logger = InstancePrefixLogger.build_prefixed(base_coin)
-            self.logger = lambda: self._prefixed_logger
-        except Exception:
-            self._prefixed_logger = self.__class__.logger()
-            self.logger = lambda: self._prefixed_logger
+        base_coin = (self.maker_pair.split("-")[0] if isinstance(self.maker_pair, str) and "-" in self.maker_pair else str(self.maker_pair))
+        self._prefixed_logger = InstancePrefixLogger.build_prefixed(base_coin)
+        self.logger = lambda: self._prefixed_logger
 
         self._funding_helper = FundingHelper(self)
         self._profitability_helper = ProfitabilityHelper(self)
@@ -119,10 +118,11 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         self.logger().info(
             f"[Start] entry={self.maker_connector}:{self.maker_pair} hedge={self.hedge_connector}:{self.hedge_pair} side={self.side_maker.name}"
         )
+        self._start_ts = float(getattr(self._strategy, "current_timestamp", 0))
+        self._last_fill_ts = None
         self._desired_hedge_position_mode: PositionMode = (
             PositionMode.ONEWAY if self.hedge_connector == "hyperliquid_perpetual" else PositionMode.HEDGE
         )
-        # Attempt to request desired position mode once at start (best effort)
         try:
             if self._desired_hedge_position_mode == PositionMode.HEDGE:
                 try:
@@ -280,6 +280,23 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                 return
 
             self._closing_helper.handle_close_ttl(now)
+
+            timeout = float(getattr(self.config, "fill_timeout_sec", 0))
+            if not self._closing:
+                start_ts = self._start_ts or 0.0
+                last_fill_ts = self._last_fill_ts or 0.0
+                elapsed_since_start = (now - start_ts) if start_ts else 0.0
+                elapsed_since_last_fill = (now - last_fill_ts) if last_fill_ts else None
+                maker_pos_base = self.get_full_position_base_amount(is_maker=True)
+                if maker_pos_base <= 0:
+                    if start_ts and elapsed_since_start >= timeout:
+                        self.logger().info(f"[Timeout] No fills for {elapsed_since_start:.0f}s >= {timeout:.0f}s; stopping executor.")
+                        self.early_stop()
+                        return
+                else:
+                    if last_fill_ts and elapsed_since_last_fill is not None and elapsed_since_last_fill >= timeout:
+                        self._opening_fully_completed = True
+                        self.logger().info(f"[Timeout] Partial fills but inactive for {elapsed_since_last_fill:.0f}s >= {timeout:.0f}s; entering funding monitoring (no new opens).")
 
             last_unfilled_order = self.get_last_active_unfilled_order(is_maker=True)
 

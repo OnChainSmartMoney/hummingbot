@@ -35,7 +35,7 @@ class SignalConfig(BaseModel):
 
 
 class MakerConfig(BaseModel):
-    price_offset_bp: Decimal = Decimal("0.5")
+    price_offset_pct: Decimal = Decimal("0.5")
     ttl_sec: int = 20
     refresh_on_stale: bool = True
 
@@ -52,6 +52,7 @@ class ExecutionConfig(BaseModel):
     maker: MakerConfig = MakerConfig()
     hedge: HedgeConfig = HedgeConfig()
     non_profitable_wait_sec: int = 60
+    fill_timeout_sec: int = 180
 
 
 class RiskConfig(BaseModel):
@@ -343,7 +344,7 @@ class FundingRateArbController(ControllerBase):
                     per_order_max_notional_usd=pair_config.max_notional_per_part,
                     per_order_min_notional_usd=pair_config.min_notional_per_part,
                     order_interval_sec=self.config.execution.part_interval_sec,
-                    maker_price_offset_bp=self.config.execution.maker.price_offset_bp,
+                    maker_price_offset_pct=self.config.execution.maker.price_offset_pct,
                     maker_ttl_sec=self.config.execution.maker.ttl_sec,
                     maker_refresh_on_stale=self.config.execution.maker.refresh_on_stale,
                     hedge_min_notional_usd=self.config.execution.hedge.min_hedge_notional_usd,
@@ -351,6 +352,7 @@ class FundingRateArbController(ControllerBase):
                     exit_hold_below_sec=self.config.exit.hold_below_sec,
                     funding_profitability_interval_hours=self.config.signal.funding_profitability_interval_hours,
                     non_profitable_wait_sec=self.config.execution.non_profitable_wait_sec,
+                    fill_timeout_sec=self.config.execution.fill_timeout_sec,
                 )
 
                 actions.append(CreateExecutorAction(executor_config=exec_cfg, controller_id=self.config.id))

@@ -22,7 +22,7 @@ class OrdersHelper:
             mid = None if mid_val.is_nan() else mid_val
         if mid is None or mid <= 0:
             return None
-        off = (self.exe.config.maker_price_offset_bp / Decimal("10000"))
+        off = (self.exe.config.maker_price_offset_pct / Decimal("100"))
         if side == TradeType.BUY:
             return mid * (Decimal("1") - off)
         else:

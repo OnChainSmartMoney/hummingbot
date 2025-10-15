@@ -38,7 +38,6 @@ class ClosingHelper:
             self.exe._hedge_helper.finalize_tail()
 
     def handle_close_ttl(self, now: float):
-        """Called each control loop to enforce TTL on current closing order."""
         exe = self.exe
         if not (exe._closing and exe._closing_current and (exe.config.maker_ttl_sec and exe.config.maker_ttl_sec > 0)):
             return

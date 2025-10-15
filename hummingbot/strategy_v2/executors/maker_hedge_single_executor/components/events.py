@@ -59,6 +59,11 @@ class EventsHelper:
     def process_order_filled(self, event_tag: int, market, event: OrderFilledEvent):
         exe = self.exe
         mid_maker = exe.get_price(exe.maker_connector, exe.maker_pair, PriceType.MidPrice)
+
+        market_name = exe._market_name(market)
+        if market_name == exe.maker_connector:
+            exe._last_fill_ts = float(exe._strategy.current_timestamp)
+
         if exe._closing_current and event.order_id == exe._closing_current.get("close_order_id"):
             filled_base = Decimal(str(event.amount))
             exe._closing_current["executed_base"] = exe._closing_current.get("executed_base", Decimal("0")) + filled_base
