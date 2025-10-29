@@ -156,30 +156,25 @@ class BybitPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
                 await self._connector.exchange_symbol_associated_to_pair(trading_pair=trading_pair)
                 for trading_pair in trading_pairs
             ]
-            symbols_str = "|".join(symbols)
 
-            payload = {
-                "op": "subscribe",
-                "args": [f"{CONSTANTS.WS_TRADES_TOPIC}.{symbols_str}"],
-            }
-            subscribe_trade_request = WSJSONRequest(payload=payload)
+            for symbol in symbols:
+                await ws.send(WSJSONRequest(payload={
+                    "op": "subscribe",
+                    "args": [f"{CONSTANTS.WS_TRADES_TOPIC}.{symbol}"],
+                }))
+                await ws.send(WSJSONRequest(payload={
+                    "op": "subscribe",
+                    "args": [f"{CONSTANTS.WS_ORDER_BOOK_EVENTS_TOPIC}.{symbol}"],
+                }))
+                await ws.send(WSJSONRequest(payload={
+                    "op": "subscribe",
+                    "args": [f"orderbook.50.{symbol}"],
+                }))
+                await ws.send(WSJSONRequest(payload={
+                    "op": "subscribe",
+                    "args": [f"{CONSTANTS.WS_INSTRUMENTS_INFO_TOPIC}.{symbol}"],
+                }))
 
-            payload = {
-                "op": "subscribe",
-                "args": [f"{CONSTANTS.WS_ORDER_BOOK_EVENTS_TOPIC}.{symbols_str}"],
-            }
-            subscribe_orderbook_request = WSJSONRequest(payload=payload)
-
-            payload = {
-                "op": "subscribe",
-                "args": [f"{CONSTANTS.WS_INSTRUMENTS_INFO_TOPIC}.{symbols_str}"],
-            }
-            subscribe_instruments_request = WSJSONRequest(payload=payload)
-
-            await ws.send(subscribe_trade_request)  # not rate-limited
-            await ws.send(subscribe_orderbook_request)  # not rate-limited
-            await ws.send(subscribe_instruments_request)  # not rate-limited
-            self.logger().info("Subscribed to public order book, trade and funding info channels...")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -198,12 +193,12 @@ class BybitPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         channel = ""
         if "success" not in event_message:
             event_channel = event_message["topic"]
-            event_channel = ".".join(event_channel.split(".")[:-1])
-            if event_channel == CONSTANTS.WS_TRADES_TOPIC:
+            event_channel_root = ".".join(event_channel.split(".")[:-1])
+            if event_channel_root == CONSTANTS.WS_TRADES_TOPIC:
                 channel = self._trade_messages_queue_key
-            elif event_channel == CONSTANTS.WS_ORDER_BOOK_EVENTS_TOPIC:
+            elif event_channel_root.startswith("orderbook"):
                 channel = self._diff_messages_queue_key
-            elif event_channel == CONSTANTS.WS_INSTRUMENTS_INFO_TOPIC:
+            elif event_channel_root == CONSTANTS.WS_INSTRUMENTS_INFO_TOPIC:
                 channel = self._funding_info_messages_queue_key
         return channel
 
@@ -272,8 +267,8 @@ class BybitPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
     async def _order_book_snapshot(self, trading_pair: str) -> OrderBookMessage:
         snapshot_response = await self._request_order_book_snapshot(trading_pair)
         snapshot_data = snapshot_response["result"]
-        timestamp = float(snapshot_data["ts"])
-        update_id = self._nonce_provider.get_tracking_nonce(timestamp=timestamp)
+        timestamp_seconds = int(snapshot_data["ts"]) / 1e3
+        update_id = self._nonce_provider.get_tracking_nonce(timestamp=timestamp_seconds)
 
         bids, asks = self._get_bids_and_asks_from_rest_msg_data(snapshot_data)
         order_book_message_content = {
@@ -285,7 +280,7 @@ class BybitPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         snapshot_msg: OrderBookMessage = OrderBookMessage(
             message_type=OrderBookMessageType.SNAPSHOT,
             content=order_book_message_content,
-            timestamp=timestamp,
+            timestamp=timestamp_seconds,
         )
 
         return snapshot_msg

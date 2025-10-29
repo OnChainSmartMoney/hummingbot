@@ -135,22 +135,45 @@ class OrdersHelper:
         if not exe._profitability_helper.last_profitable_ts:
             exe._profitability_helper.last_profitable_ts = now_ts
 
-        if not is_profitability_check_passed:
-            elapsed = now_ts - exe._profitability_helper.last_profitable_ts
-            if not exe._profitability_helper.is_profitable_on_last_check:
-                if elapsed >= wait_sec:
-                    if not exe.is_any_position_open():
-                        exe.logger().info(f"[Profitability] {exe.maker_pair} wait time exceeded ({elapsed:.0f}s >= {wait_sec:.0f}s); no open orders, stopping executor.")
-                        exe.early_stop()
-                        return
-                    exe._opening_fully_completed = True
-                    exe.logger().info(f"[Profitability] {exe.maker_pair} wait time exceeded ({elapsed:.0f}s >= {wait_sec:.0f}s); entering funding monitoring.")
+        if exe._closing:
+            close_wait_sec = float(getattr(exe.config, "closing_non_profitable_wait_sec", 3600.0))
+            if not is_profitability_check_passed:
+                start_ts = getattr(exe, "_closing_wait_started_ts", None)
+                if start_ts is None:
+                    exe._closing_wait_started_ts = now_ts
+                    exe.logger().info(f"[Close] Not profitable yet; starting up-to-{int(close_wait_sec)}s wait before forcing close.")
+                    exe._next_order_ready_ts = now_ts + 1.0
+                    return
+                elapsed_close = now_ts - start_ts
+                if elapsed_close < close_wait_sec:
+                    remaining = max(0, int(close_wait_sec - elapsed_close))
+                    exe.logger().info(f"[Close] Not profitable yet; waiting... remaining {remaining}s before forced close.")
+                    exe._next_order_ready_ts = now_ts + 5.0
+                    return
                 else:
-                    exe.logger().info(f"[Profitability] {exe.maker_pair} still not profitable; waiting {wait_sec - elapsed:.0f}s more.")
+                    exe.logger().info(f"[Close] Waited {int(elapsed_close)}s; forcing close without profitability condition.")
+            else:
+                try:
+                    setattr(exe, "_closing_wait_started_ts", None)
+                except Exception:
+                    pass
+        else:
+            if not is_profitability_check_passed:
+                elapsed = now_ts - exe._profitability_helper.last_profitable_ts
+                if not exe._profitability_helper.is_profitable_on_last_check:
+                    if elapsed >= wait_sec:
+                        if not exe.is_any_position_open():
+                            exe.logger().info(f"[Profitability] {exe.maker_pair} wait time exceeded ({elapsed:.0f}s >= {wait_sec:.0f}s); no open orders, stopping executor.")
+                            exe.early_stop()
+                            return
+                        exe._opening_fully_completed = True
+                        exe.logger().info(f"[Profitability] {exe.maker_pair} wait time exceeded ({elapsed:.0f}s >= {wait_sec:.0f}s); entering funding monitoring.")
+                    else:
+                        exe.logger().info(f"[Profitability] {exe.maker_pair} still not profitable; waiting {wait_sec - elapsed:.0f}s more.")
+                    return
+                exe._profitability_helper.is_profitable_on_last_check = False
+                exe.logger().info(f"[Profitability] {exe.maker_pair} not profitable; starting wait window {wait_sec:.0f}s.")
                 return
-            exe._profitability_helper.is_profitable_on_last_check = False
-            exe.logger().info(f"[Profitability] {exe.maker_pair} not profitable; starting wait window {wait_sec:.0f}s.")
-            return
 
         exe._profitability_helper.is_profitable_on_last_check = True
         exe._profitability_helper.last_profitable_ts = now_ts

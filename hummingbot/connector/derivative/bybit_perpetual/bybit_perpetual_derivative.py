@@ -144,7 +144,7 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
         """
         :return a list of OrderType supported by this connector
         """
-        return [OrderType.LIMIT, OrderType.MARKET]
+        return [OrderType.LIMIT, OrderType.LIMIT_MAKER, OrderType.MARKET]
 
     def supported_position_modes(self) -> List[PositionMode]:
         if all(bybit_utils.is_linear_perpetual(tp) for tp in self._trading_pairs):
@@ -211,6 +211,16 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
         self._validate_exchange_response(cancel_result)
         return True
 
+    def _get_time_in_force(self, order_type: OrderType) -> str:
+        if order_type == OrderType.LIMIT_MAKER:
+            return 'PostOnly'
+        return CONSTANTS.DEFAULT_TIME_IN_FORCE
+
+    def _get_order_type_api_string(self, order_type: OrderType) -> str:
+        if order_type == OrderType.LIMIT_MAKER:
+            return CONSTANTS.ORDER_TYPE_MAP[OrderType.LIMIT]
+        return CONSTANTS.ORDER_TYPE_MAP[order_type]
+
     async def _place_order(
         self,
         order_id: str,
@@ -228,12 +238,12 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
             "side": "Buy" if trade_type == TradeType.BUY else "Sell",
             "symbol": await self.exchange_symbol_associated_to_pair(trading_pair),
             "qty": str(amount),
-            "timeInForce": CONSTANTS.DEFAULT_TIME_IN_FORCE,
+            "timeInForce": self._get_time_in_force(order_type),
             "closeOnTrigger": position_action == PositionAction.CLOSE,
             "orderLinkId": order_id,
             "reduceOnly": position_action == PositionAction.CLOSE,
             "positionIdx": position_idx,
-            "orderType": CONSTANTS.ORDER_TYPE_MAP[order_type],
+            "orderType": self._get_order_type_api_string(order_type),
         }
         if order_type.is_limit_type():
             data["price"] = str(price)

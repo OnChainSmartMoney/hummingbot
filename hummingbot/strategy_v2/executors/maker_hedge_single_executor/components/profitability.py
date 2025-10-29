@@ -20,8 +20,6 @@ class ProfitabilityHelper:
         self.profitability_should_be_negative: bool = False
 
     def check_enter_condition(self, maker_side: TradeType, maker_price: Decimal, amount: Decimal) -> bool:
-        if self.exe._closing:
-            return True
 
         if self.profitability_should_be_negative:
             return False

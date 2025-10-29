@@ -339,6 +339,7 @@ class FundingRateArbController(ControllerBase):
                     maker_market=ConnectorPair(connector_name=entry_ex, trading_pair=entry_tp),
                     hedge_market=ConnectorPair(connector_name=hedge_ex, trading_pair=hedge_tp),
                     side_maker=maker_side.name,
+                    controller_id=self.config.id,
                     leverage=self.config.execution.leverage,
                     pair_notional_usd_cap=pair_cap_usd,
                     per_order_max_notional_usd=pair_config.max_notional_per_part,

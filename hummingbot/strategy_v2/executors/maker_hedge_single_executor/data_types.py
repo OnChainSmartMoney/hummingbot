@@ -1,7 +1,7 @@
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair, ExecutorConfigBase
 
@@ -29,6 +29,13 @@ class MakerHedgeSingleExecutorConfig(ExecutorConfigBase):
 
     non_profitable_wait_sec: int = 60
     fill_timeout_sec: int = 180
+
+    @field_validator("controller_id", mode="before")
+    @classmethod
+    def _ensure_controller_id(cls, v):
+        if v is None or (isinstance(v, str) and v.strip() == ""):
+            return "main"
+        return v
 
     @property
     def trading_pair(self) -> str:
