@@ -18,8 +18,11 @@ class ProfitabilityHelper:
         self.last_profitable_ts: float = 0.0
         self.should_open_positions: bool = True
         self.profitability_should_be_negative: bool = False
+        self.profitability_always_positive: bool = False
 
     def check_enter_condition(self, maker_side: TradeType, maker_price: Decimal, amount: Decimal) -> bool:
+        if self.profitability_always_positive:
+            return True
 
         if self.profitability_should_be_negative:
             return False

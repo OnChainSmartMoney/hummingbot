@@ -62,6 +62,9 @@ class RiskConfig(BaseModel):
 class ExitConfig(BaseModel):
     fr_spread_below_pct: Optional[Decimal] = None
     hold_below_sec: int = 60
+    closing_non_profitable_wait_sec: int = 3600
+    liquidation_limit_close_pct: Decimal = Decimal("10")
+    liquidation_market_close_pct: Decimal = Decimal("2")
 
 
 class FundingRateArbControllerConfig(ControllerConfigBase):
@@ -354,6 +357,9 @@ class FundingRateArbController(ControllerBase):
                     funding_profitability_interval_hours=self.config.signal.funding_profitability_interval_hours,
                     non_profitable_wait_sec=self.config.execution.non_profitable_wait_sec,
                     fill_timeout_sec=self.config.execution.fill_timeout_sec,
+                    closing_non_profitable_wait_sec=self.config.exit.closing_non_profitable_wait_sec,
+                    liquidation_limit_close_pct=self.config.exit.liquidation_limit_close_pct,
+                    liquidation_market_close_pct=self.config.exit.liquidation_market_close_pct,
                 )
 
                 actions.append(CreateExecutorAction(executor_config=exec_cfg, controller_id=self.config.id))
@@ -457,6 +463,7 @@ class FundingRateArbController(ControllerBase):
         outputs: List[str] = []
         exec_rows: List[Dict[str, Any]] = []
         order_rows: List[Dict[str, Any]] = []
+        info_rows: List[Dict[str, Any]] = []
 
         for ei in self.executors_info:
             if not ei.is_active:
@@ -478,8 +485,8 @@ class FundingRateArbController(ControllerBase):
             maker_pos = _to_decimal(info.get("maker_position_base", "0"))
             maker_pos_quote = _to_decimal(info.get("maker_position_quote", "0"))
             hedge_pos = _to_decimal(info.get("hedge_position_base", "0"))
-            net_pnl_quote = _to_decimal(info.get("net_pnl_quote", ei.net_pnl_quote))
-            net_pnl_pct = _to_decimal(info.get("net_pnl_pct", ei.net_pnl_pct))
+            maker_unrealized_pnl = _to_decimal(info.get("maker_unrealized_pnl"))
+            hedge_unrealized_pnl = _to_decimal(info.get("hedge_unrealized_pnl"))
             funding_pnl_maker = _to_decimal(info.get("funding_pnl_quote_maker", info.get("funding_pnl_quote", 0)))
             funding_pnl_hedge = _to_decimal(info.get("funding_pnl_quote_hedge", 0))
             funding_pnl_net = _to_decimal(info.get("funding_pnl_quote_net", funding_pnl_maker + funding_pnl_hedge))
@@ -489,6 +496,11 @@ class FundingRateArbController(ControllerBase):
             min_to_funding_entry = info.get("minutes_to_funding_entry")
             min_to_funding_hedge = info.get("minutes_to_funding_hedge")
 
+            last_diff_pct_to_liquidation_maker = info.get("last_diff_pct_to_liquidation_maker")
+            last_diff_pct_to_liquidation_hedge = info.get("last_diff_pct_to_liquidation_hedge")
+            last_liquidation_price_maker = info.get("last_liquidation_price_maker")
+            last_liquidation_price_hedge = info.get("last_liquidation_price_hedge")
+
             exec_rows.append({
                 "Entry": f"{entry_ex}:{entry_tp}",
                 "Hedge": f"{hedge_ex}:{hedge_tp}",
@@ -497,14 +509,23 @@ class FundingRateArbController(ControllerBase):
                 "Maker pos": _decimal_to_str(maker_pos),
                 "Hedge pos": _decimal_to_str(hedge_pos),
                 "Maker pos $": _decimal_to_str(maker_pos_quote),
-                "Net pnl quote": _decimal_to_str(net_pnl_quote),
-                "Net pnl %": _decimal_to_str(net_pnl_pct),
+                "Maker unrealized PnL": _decimal_to_str(maker_unrealized_pnl),
+                "Hedge unrealized PnL": _decimal_to_str(hedge_unrealized_pnl),
                 "Funding pnl maker": _decimal_to_str(funding_pnl_maker),
                 "Funding pnl hedge": _decimal_to_str(funding_pnl_hedge),
                 "Funding pnl net": _decimal_to_str(funding_pnl_net),
                 "Funding diff %": _decimal_to_str(oriented_diff) if oriented_diff is not None else "-",
+            })
+
+            info_rows.append({
+                "Entry": f"{entry_ex}:{entry_tp}",
+                "Hedge": f"{hedge_ex}:{hedge_tp}",
                 "Min entry fund": _to_int(min_to_funding_entry) if min_to_funding_entry is not None else "-",
                 "Min hedge fund": _to_int(min_to_funding_hedge) if min_to_funding_hedge is not None else "-",
+                "Diff to liq maker %": _decimal_to_str(last_diff_pct_to_liquidation_maker) if last_diff_pct_to_liquidation_maker is not None else "-",
+                "Diff to liq hedge %": _decimal_to_str(last_diff_pct_to_liquidation_hedge) if last_diff_pct_to_liquidation_hedge is not None else "-",
+                "Liq price maker": _decimal_to_str(last_liquidation_price_maker) if last_liquidation_price_maker is not None else "-",
+                "Liq price hedge": _decimal_to_str(last_liquidation_price_hedge) if last_liquidation_price_hedge is not None else "-",
             })
 
             maker_orders = info.get("maker_open_orders", []) or []
@@ -535,6 +556,9 @@ class FundingRateArbController(ControllerBase):
 
         exec_df = pd.DataFrame(exec_rows)
         outputs.append("Active executors:\n" + format_df_for_printout(exec_df, table_format="psql", index=False))
+
+        info_df = pd.DataFrame(info_rows)
+        outputs.append("Executor info summary:\n" + format_df_for_printout(info_df, table_format="psql", index=False))
 
         if order_rows:
             orders_df = pd.DataFrame(order_rows)

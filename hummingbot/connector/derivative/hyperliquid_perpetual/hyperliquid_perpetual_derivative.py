@@ -728,6 +728,7 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
             amount = Decimal(position.get("szi", 0))
             leverage = Decimal(position.get("leverage").get("value"))
             pos_key = self._perpetual_trading.position_key(hb_trading_pair, position_side)
+            liquidation_price = Decimal(position.get("liquidationPx")) if position.get("liquidationPx") else None
             if amount != 0:
                 _position = Position(
                     trading_pair=hb_trading_pair,
@@ -735,7 +736,8 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
                     unrealized_pnl=unrealized_pnl,
                     entry_price=entry_price,
                     amount=amount,
-                    leverage=leverage
+                    leverage=leverage,
+                    liquidation_price=liquidation_price,
                 )
                 self._perpetual_trading.set_position(pos_key, _position)
             else:
@@ -764,7 +766,7 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
         params = {
             "type": "updateLeverage",
             "asset": self.coin_to_asset[coin],
-            "isCross": True,
+            "isCross": False,
             "leverage": leverage,
         }
         try:

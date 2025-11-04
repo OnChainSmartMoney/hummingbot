@@ -3,6 +3,8 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING, Dict, List
 
+from hummingbot.core.data_type.common import PositionAction
+
 if TYPE_CHECKING:
     from hummingbot.strategy_v2.executors.maker_hedge_single_executor.maker_hedge_single_executor import (
         MakerHedgeSingleExecutor,
@@ -18,12 +20,49 @@ class ClosingHelper:
         if exe._close_queue:
             return
         queue: List[Dict] = []
+
+        def _fmt_tracked(o) -> Dict:
+            ord_obj = getattr(o, "order", None)
+
+            def _safe(attr, default=None):
+                try:
+                    return getattr(ord_obj, attr, default)
+                except Exception:
+                    return default
+            pos = _safe("position")
+            try:
+                pos_str = pos.name if hasattr(pos, "name") else str(pos)
+            except Exception:
+                pos_str = str(pos)
+            return {
+                "order_id": getattr(o, "order_id", None),
+                "exchange_order_id": _safe("exchange_order_id"),
+                "trading_pair": _safe("trading_pair"),
+                "position": pos_str,
+                "is_open": _safe("is_open"),
+                "amount": _safe("amount"),
+                "executed_amount_base": getattr(o, "executed_amount_base", None),
+                "price": _safe("price"),
+                "average_executed_price": getattr(o, "average_executed_price", None),
+                "creation_timestamp": _safe("creation_timestamp"),
+            }
+
+        try:
+            summaries = [_fmt_tracked(o) for o in exe._maker_orders]
+            self.exe.logger().info(f"[Close queue] Building FIFO close queue from existing OPEN maker orders: {summaries}")
+        except Exception:
+            self.exe.logger().info(f"[Close queue] Building FIFO close queue from {len(exe._maker_orders)} maker orders")
+
         for o in exe._maker_orders:
             order = o.order
+            try:
+                self.exe.logger().info(f"[Close queue] Candidate: {_fmt_tracked(o)}")
+            except Exception:
+                pass
             if order is None:
                 continue
             try:
-                if order.position == exe.PositionAction.OPEN and (o.executed_amount_base or Decimal("0")) > 0:
+                if order.position == PositionAction.OPEN and (o.executed_amount_base or Decimal("0")) > 0:
                     queue.append({"open_id": o.order_id, "amount": o.executed_amount_base})
             except Exception:
                 continue

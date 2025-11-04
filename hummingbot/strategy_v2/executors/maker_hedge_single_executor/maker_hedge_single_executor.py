@@ -27,6 +27,7 @@ from .components.events import EventsHelper
 from .components.exposure import ExposureHelper
 from .components.funding import FundingHelper
 from .components.hedge import HedgeHelper
+from .components.liquidation import LiquidationHelper
 from .components.logging_prefix import InstancePrefixLogger
 from .components.orders import OrdersHelper
 from .components.profitability import ProfitabilityHelper
@@ -66,6 +67,7 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         self._max_parallel_hedges: int = 2
 
         self._maker_pending_ids: set[str] = set()
+        self._maker_cancel_pending: set[str] = set()
 
         self._cum_fees_quote: Decimal = Decimal("0")
         self._net_pnl_quote: Decimal = Decimal("0")
@@ -81,6 +83,7 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         self._closing: bool = False
         self._close_queue: List[Dict] = []
         self._closing_current: Optional[Dict] = None
+        self._closing_no_wait: bool = False
 
         self._waiting_hedge_ack: bool = False
         self._last_hedge_order_id: Optional[str] = None
@@ -98,6 +101,14 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         self._orders_helper: Optional[OrdersHelper] = None
         self._closing_helper: Optional[ClosingHelper] = None
         self._risk_helper: Optional[RiskHelper] = None
+        self._liquidation_helper: Optional[LiquidationHelper] = None
+
+        self._last_liquidation_price_maker: Optional[Decimal] = None
+        self._last_liquidation_price_hedge: Optional[Decimal] = None
+        self._last_diff_pct_to_liquidation_maker: Optional[Decimal] = None
+        self._last_diff_pct_to_liquidation_hedge: Optional[Decimal] = None
+        self._maker_unrealized_pnl: Optional[Decimal] = None
+        self._hedge_unrealized_pnl: Optional[Decimal] = None
 
         super().__init__(strategy=strategy, connectors=[self.maker_connector, self.hedge_connector], config=config, update_interval=update_interval)
 
@@ -113,6 +124,7 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         self._orders_helper = OrdersHelper(self)
         self._closing_helper = ClosingHelper(self)
         self._risk_helper = RiskHelper(self)
+        self._liquidation_helper = LiquidationHelper(self)
 
     async def on_start(self):
         self.logger().info(
@@ -192,7 +204,11 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                 if order.is_filled:
                     continue
                 if order.order is not None:
-                    return order
+                    try:
+                        if getattr(order.order, "is_open", False):
+                            return order
+                    except Exception:
+                        pass
                 if is_maker and order.order_id in self._maker_pending_ids:
                     return order
         return None
@@ -272,6 +288,7 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             now = self._strategy.current_timestamp
 
             if self._opening_fully_completed and not self._closing:
+                self._liquidation_helper.monitor(now)
                 if not self.is_any_position_open():
                     self.early_stop()
                     return
@@ -295,12 +312,29 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                         return
                 else:
                     if last_fill_ts and elapsed_since_last_fill is not None and elapsed_since_last_fill >= timeout:
+                        try:
+                            cancelled_cnt = 0
+                            for order in list(self._maker_orders):
+                                try:
+                                    if order.order and getattr(order.order, "is_open", False) and not order.is_filled:
+                                        self.logger().info(f"[Timeout] Cancelling stale maker order {order.order_id} before funding monitoring.")
+                                        self.cancel_order(order, is_maker=True)
+                                        cancelled_cnt += 1
+                                except Exception:
+                                    continue
+                            if cancelled_cnt > 0:
+                                self.logger().info(f"[Timeout] Cancelled {cancelled_cnt} open maker order(s) before entering funding monitoring.")
+                        except Exception as e:
+                            self.logger().warning(f"[Timeout] Error cancelling open maker orders: {e}")
                         self._opening_fully_completed = True
                         self.logger().info(f"[Timeout] Partial fills but inactive for {elapsed_since_last_fill:.0f}s >= {timeout:.0f}s; entering funding monitoring (no new opens).")
+                        return
 
             last_unfilled_order = self.get_last_active_unfilled_order(is_maker=True)
 
             if last_unfilled_order is None and self._closing_current is None:
+                if self._opening_fully_completed and (not self._closing):
+                    return
                 if self._maker_pending_ids:
                     return
 
@@ -320,8 +354,15 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                 if not self._closing and self.config.maker_ttl_sec and self.config.maker_ttl_sec > 0:
                     unfilled_maker_creation_time = getattr(last_unfilled_order, "creation_timestamp", 0) or 0
                     if unfilled_maker_creation_time > 0 and (now - unfilled_maker_creation_time) >= float(self.config.maker_ttl_sec):
-                        self.logger().info(f"[TTL] Cancelling stale maker order {last_unfilled_order.order_id} due to TTL exceeded.")
-                        self.cancel_order(last_unfilled_order, is_maker=True)
+                        is_open = False
+                        try:
+                            is_open = bool(getattr(last_unfilled_order.order, "is_open", False))
+                        except Exception:
+                            is_open = False
+                        if is_open and last_unfilled_order.order_id not in self._maker_cancel_pending:
+                            self.logger().info(f"[TTL] Cancelling stale maker order {last_unfilled_order.order_id} due to TTL exceeded.")
+                            self._maker_cancel_pending.add(last_unfilled_order.order_id)
+                            self.cancel_order(last_unfilled_order, is_maker=True)
 
         elif self.status == RunnableStatus.SHUTTING_DOWN:
             pass
@@ -393,7 +434,14 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         return self._events_helper.process_order_completed(event_tag, market, event)
 
     def process_order_canceled_event(self, event_tag: int, market: ConnectorBase, event: OrderCancelledEvent):
-        return self._events_helper.process_order_canceled(event_tag, market, event)
+        result = self._events_helper.process_order_canceled(event_tag, market, event)
+        try:
+            oid = getattr(event, "order_id", None)
+            if oid:
+                self._maker_cancel_pending.discard(oid)
+        except Exception:
+            pass
+        return result
 
     def process_order_failed_event(self, event_tag: int, market: ConnectorBase, event: MarketOrderFailureEvent):
         return self._events_helper.process_order_failed(event_tag, market, event)
@@ -470,6 +518,8 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             "maker_position_base": maker_pos_base,
             "maker_position_quote": (maker_pos_base * self.get_price(self.maker_connector, self.maker_pair, PriceType.MidPrice)),
             "hedge_position_base": hedge_pos_base,
+            "maker_unrealized_pnl": self._maker_unrealized_pnl,
+            "hedge_unrealized_pnl": self._hedge_unrealized_pnl,
             "net_pnl_quote": self.get_net_pnl_quote(),
             "net_pnl_pct": self.get_net_pnl_pct(),
             "funding_pnl_quote_maker": self._cum_funding_maker_quote,
@@ -485,6 +535,10 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             "maker_open_orders": maker_open_orders,
             "hedge_open_orders": hedge_open_orders,
             "held_position_orders": [],
+            "last_diff_pct_to_liquidation_maker": self._last_diff_pct_to_liquidation_maker,
+            "last_diff_pct_to_liquidation_hedge": self._last_diff_pct_to_liquidation_hedge,
+            "last_liquidation_price_maker": self._last_liquidation_price_maker,
+            "last_liquidation_price_hedge": self._last_liquidation_price_hedge,
         }
 
     def close_all_positions_by_market(self):

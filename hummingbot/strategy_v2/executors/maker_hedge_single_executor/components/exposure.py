@@ -62,6 +62,30 @@ class ExposureHelper:
                 position += exec_base
         return position
 
+    def get_avg_entry_price(self, is_maker: bool = True) -> Optional[Decimal]:
+        orders = self.exe._maker_orders if is_maker else self.exe._hedge_orders
+        total_base = Decimal("0")
+        total_quote = Decimal("0")
+        for o in orders:
+            ord = o.order
+            try:
+                if ord is None:
+                    continue
+                if getattr(ord, "position", None) == PositionAction.OPEN:
+                    exec_base = o.executed_amount_base or Decimal("0")
+                    avg_px = o.average_executed_price
+                    if exec_base and exec_base > 0 and avg_px is not None:
+                        total_base += exec_base
+                        total_quote += exec_base * avg_px
+            except Exception:
+                continue
+        if total_base <= 0:
+            return None
+        try:
+            return total_quote / total_base
+        except Exception:
+            return None
+
     def get_maker_order_usd_consumed(self) -> Decimal:
         consumed = Decimal("0")
         for order in self.exe._maker_orders:

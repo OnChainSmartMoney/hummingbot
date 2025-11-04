@@ -482,12 +482,28 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
             ex_trading_pair = data.get("symbol")
             amount = Decimal(str(data["size"]))
             hb_trading_pair = await self.trading_pair_associated_to_exchange_symbol(ex_trading_pair)
-            position_side = PositionSide.LONG if data["side"] == "Buy" else PositionSide.SHORT
+
+            position_idx_raw = data.get("positionIdx", 0)
+            try:
+                position_idx = int(str(position_idx_raw))
+            except Exception:
+                position_idx = 0
+            side_str = str(data.get("side", "")).strip()
+            if self.position_mode == PositionMode.HEDGE:
+                if position_idx == CONSTANTS.POSITION_IDX_HEDGE_BUY:
+                    position_side = PositionSide.LONG
+                elif position_idx == CONSTANTS.POSITION_IDX_HEDGE_SELL:
+                    position_side = PositionSide.SHORT
+                else:
+                    position_side = PositionSide.LONG if side_str == "Buy" else PositionSide.SHORT
+            else:
+                position_side = PositionSide.LONG if side_str == "Buy" else PositionSide.SHORT
             pos_key = self._perpetual_trading.position_key(hb_trading_pair, position_side)
             if amount != s_decimal_0:
                 unrealized_pnl = Decimal(str(data["unrealisedPnl"]))
                 entry_price = Decimal(str(data["avgPrice"]))
                 leverage = Decimal(str(data["leverage"]))
+                liquidation_price = Decimal(str(data["liqPrice"]))
                 position = Position(
                     trading_pair=hb_trading_pair,
                     position_side=position_side,
@@ -495,6 +511,7 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
                     entry_price=entry_price,
                     amount=amount * (Decimal("-1.0") if position_side == PositionSide.SHORT else Decimal("1.0")),
                     leverage=leverage,
+                    liquidation_price=liquidation_price,
                 )
                 self._perpetual_trading.set_position(pos_key, position)
             else:
@@ -613,12 +630,27 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
         """
         ex_trading_pair = position_msg["symbol"]
         trading_pair = await self.trading_pair_associated_to_exchange_symbol(symbol=ex_trading_pair)
-        position_side = PositionSide.LONG if position_msg["side"] == "Buy" else PositionSide.SHORT
-        position_value = Decimal(str(position_msg["positionValue"]))
+
+        position_idx_raw = position_msg.get("positionIdx", 0)
+        try:
+            position_idx = int(str(position_idx_raw))
+        except Exception:
+            position_idx = 0
+        side_str = str(position_msg.get("side", "")).strip()
+        if self.position_mode == PositionMode.HEDGE:
+            if position_idx == CONSTANTS.POSITION_IDX_HEDGE_BUY:
+                position_side = PositionSide.LONG
+            elif position_idx == CONSTANTS.POSITION_IDX_HEDGE_SELL:
+                position_side = PositionSide.SHORT
+            else:
+                position_side = PositionSide.LONG if side_str == "Buy" else PositionSide.SHORT
+        else:
+            position_side = PositionSide.LONG if side_str == "Buy" else PositionSide.SHORT
         entry_price = Decimal(str(position_msg["entryPrice"]))
         amount = Decimal(str(position_msg["size"]))
         leverage = Decimal(str(position_msg["leverage"]))
-        unrealized_pnl = position_value - (amount * entry_price * leverage)
+        unrealized_pnl = Decimal(str(position_msg["unrealisedPnl"]))
+        liquidation_price = Decimal(str(position_msg["liqPrice"]))
         pos_key = self._perpetual_trading.position_key(trading_pair, position_side)
         if amount != s_decimal_0:
             position = Position(
@@ -628,6 +660,7 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
                 entry_price=entry_price,
                 amount=amount * (Decimal("-1.0") if position_side == PositionSide.SHORT else Decimal("1.0")),
                 leverage=leverage,
+                liquidation_price=liquidation_price,
             )
             self._perpetual_trading.set_position(pos_key, position)
         else:
@@ -890,6 +923,12 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
                 endpoint=path_url,
                 trading_pair=trading_pair,
             )
+        limit_id = self._ensure_registered_limit_id(
+            primary_limit_id=limit_id,
+            endpoint=path_url,
+            method=method,
+            trading_pair=trading_pair,
+        )
         url = web_utils.get_rest_url_for_endpoint(endpoint=path_url, trading_pair=trading_pair, domain=self._domain)
 
         resp = await rest_assistant.execute_request(
@@ -902,3 +941,52 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
             throttler_limit_id=limit_id if limit_id else path_url,
         )
         return resp
+
+    def _ensure_registered_limit_id(
+        self,
+        primary_limit_id: Optional[str],
+        endpoint: Any,
+        method: RESTMethod,
+        trading_pair: Optional[str],
+    ) -> str:
+        """
+        Some endpoints use pair-specific limit ids. If a request is built without a trading_pair (or with a pair
+        not present in the throttler configuration), the computed primary_limit_id may not exist in the throttler.
+        In that case we fall back to a known-registered limit id to prevent throttler errors.
+        Preference order:
+        1) Use the provided primary_limit_id if registered.
+        2) If trading_pair is provided, use the appropriate per-pair private bucket (POST->100, GET->600) for the market.
+        3) Fallback to global GET/POST limit ids.
+        """
+        try:
+            if primary_limit_id is not None and self._throttler.get_related_limits(primary_limit_id)[0] is not None:
+                return primary_limit_id
+
+            is_get = (method == RESTMethod.GET)
+
+            if trading_pair is not None:
+                is_linear = bybit_utils.is_linear_perpetual(trading_pair)
+                if is_linear:
+                    bucket_base = (CONSTANTS.LINEAR_PRIVATE_BUCKET_600_LIMIT_ID if is_get
+                                   else CONSTANTS.LINEAR_PRIVATE_BUCKET_100_LIMIT_ID)
+                else:
+                    bucket_base = (CONSTANTS.NON_LINEAR_PRIVATE_BUCKET_600_LIMIT_ID if is_get
+                                   else CONSTANTS.NON_LINEAR_PRIVATE_BUCKET_100_LIMIT_ID)
+                per_pair_bucket_id = web_utils.get_pair_specific_limit_id(bucket_base, trading_pair)
+                if self._throttler.get_related_limits(per_pair_bucket_id)[0] is not None:
+                    self.logger().debug(
+                        f"Throttler limit id '{primary_limit_id}' not registered; using bucket '{per_pair_bucket_id}'"
+                    )
+                    return per_pair_bucket_id
+
+            global_limit_id = CONSTANTS.GET_LIMIT_ID if is_get else CONSTANTS.POST_LIMIT_ID
+            if self._throttler.get_related_limits(global_limit_id)[0] is not None:
+                self.logger().debug(
+                    f"Throttler limit id '{primary_limit_id}' not registered; using global '{global_limit_id}'"
+                )
+                return global_limit_id
+
+        except Exception:
+            return CONSTANTS.GET_LIMIT_ID if method == RESTMethod.GET else CONSTANTS.POST_LIMIT_ID
+
+        return CONSTANTS.GET_LIMIT_ID if method == RESTMethod.GET else CONSTANTS.POST_LIMIT_ID

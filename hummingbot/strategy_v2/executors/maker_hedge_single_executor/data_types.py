@@ -30,6 +30,11 @@ class MakerHedgeSingleExecutorConfig(ExecutorConfigBase):
     non_profitable_wait_sec: int = 60
     fill_timeout_sec: int = 180
 
+    closing_non_profitable_wait_sec: int = 3600
+
+    liquidation_limit_close_pct: Decimal = Decimal("5")
+    liquidation_market_close_pct: Decimal = Decimal("1")
+
     @field_validator("controller_id", mode="before")
     @classmethod
     def _ensure_controller_id(cls, v):

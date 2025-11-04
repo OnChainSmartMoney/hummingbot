@@ -6,17 +6,10 @@ connectors:
   - bybit_perpetual
 
 pairs:
-  - base: SOL
-    total_notional_usd_per_pair: 100
-    max_notional_per_part: 50
-    min_notional_per_part: 20
-    per_exchange_quote:
-      hyperliquid_perpetual: USD
-      bybit_perpetual: USDT
   - base: ETH
     total_notional_usd_per_pair: 200
     max_notional_per_part: 100
-    min_notional_per_part: 50
+    min_notional_per_part: 20
     per_exchange_quote:
       hyperliquid_perpetual: USD
       bybit_perpetual: USDT
@@ -29,8 +22,8 @@ execution:
   total_notional_usd: 800
   leverage: 10
   part_interval_sec: 8
-  non_profitable_wait_sec: 60
-  fill_timeout_sec: 60
+  non_profitable_wait_sec: 1200
+  fill_timeout_sec: 300
   maker:
     price_offset_pct: 0.02
     ttl_sec: 15
@@ -44,3 +37,6 @@ risk:
 exit:
   fr_spread_below_pct: 0.00
   hold_below_sec: 60
+  closing_non_profitable_wait_sec: 3600
+  liquidation_limit_close_pct: 5
+  liquidation_market_close_pct: 1

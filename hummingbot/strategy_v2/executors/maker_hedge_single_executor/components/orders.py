@@ -137,26 +137,33 @@ class OrdersHelper:
 
         if exe._closing:
             close_wait_sec = float(getattr(exe.config, "closing_non_profitable_wait_sec", 3600.0))
-            if not is_profitability_check_passed:
-                start_ts = getattr(exe, "_closing_wait_started_ts", None)
-                if start_ts is None:
-                    exe._closing_wait_started_ts = now_ts
-                    exe.logger().info(f"[Close] Not profitable yet; starting up-to-{int(close_wait_sec)}s wait before forcing close.")
-                    exe._next_order_ready_ts = now_ts + 1.0
-                    return
-                elapsed_close = now_ts - start_ts
-                if elapsed_close < close_wait_sec:
-                    remaining = max(0, int(close_wait_sec - elapsed_close))
-                    exe.logger().info(f"[Close] Not profitable yet; waiting... remaining {remaining}s before forced close.")
-                    exe._next_order_ready_ts = now_ts + 5.0
-                    return
-                else:
-                    exe.logger().info(f"[Close] Waited {int(elapsed_close)}s; forcing close without profitability condition.")
-            else:
+            if exe._closing_no_wait:
+                exe.logger().info("[Close] No-wait flag set; bypassing profitability wait due to risk trigger.")
                 try:
                     setattr(exe, "_closing_wait_started_ts", None)
                 except Exception:
                     pass
+            else:
+                if not is_profitability_check_passed:
+                    start_ts = getattr(exe, "_closing_wait_started_ts", None)
+                    if start_ts is None:
+                        exe._closing_wait_started_ts = now_ts
+                        exe.logger().info(f"[Close] Not profitable yet; starting up-to-{int(close_wait_sec)}s wait before forcing close.")
+                        exe._next_order_ready_ts = now_ts + 1.0
+                        return
+                    elapsed_close = now_ts - start_ts
+                    if elapsed_close < close_wait_sec:
+                        remaining = max(0, int(close_wait_sec - elapsed_close))
+                        exe.logger().info(f"[Close] Not profitable yet; waiting... remaining {remaining}s before forced close.")
+                        exe._next_order_ready_ts = now_ts + 5.0
+                        return
+                    else:
+                        exe.logger().info(f"[Close] Waited {int(elapsed_close)}s; forcing close without profitability condition.")
+                else:
+                    try:
+                        setattr(exe, "_closing_wait_started_ts", None)
+                    except Exception:
+                        pass
         else:
             if not is_profitability_check_passed:
                 elapsed = now_ts - exe._profitability_helper.last_profitable_ts
@@ -178,7 +185,7 @@ class OrdersHelper:
         exe._profitability_helper.is_profitable_on_last_check = True
         exe._profitability_helper.last_profitable_ts = now_ts
 
-        if not exe._profitability_helper.should_open_positions:
+        if (not exe._closing) and (not exe._profitability_helper.should_open_positions):
             exe.logger().info("[Config] Not opening new positions as per configuration")
             return
 
@@ -202,6 +209,10 @@ class OrdersHelper:
                 "creation_ts": exe._strategy.current_timestamp,
             }
             exe.logger().info(f"[Close] Placed maker CLOSE (LIMIT marketable) for open_id={open_id} -> close_id={order_id} px={px} amt={amount}")
+            try:
+                exe._closing_no_wait = False
+            except Exception:
+                pass
         else:
             exe.add_order(new_tracked, is_maker=True)
             exe._maker_pending_ids.add(order_id)
