@@ -1,3 +1,4 @@
+# Quickstart ./bin/hummingbot_quickstart.py -p q -f v2_with_controllers.py -c conf_v2_with_controllers_funding_arb.yml
 controller_type: generic
 controller_name: funding_rate_arb_controller
 
