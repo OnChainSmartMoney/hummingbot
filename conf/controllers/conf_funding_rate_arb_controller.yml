@@ -32,9 +32,6 @@ execution:
   hedge:
     min_hedge_notional_usd: 5
 
-risk:
-  max_groups_per_pair: 1
-
 exit:
   fr_spread_below_pct: 0.00
   hold_below_sec: 60

@@ -13,7 +13,6 @@ from hummingbot.strategy_v2.controllers.controller_base import ControllerBase, C
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.strategy_v2.executors.maker_hedge_single_executor.data_types import MakerHedgeSingleExecutorConfig
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction
-from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 from hummingbot.strategy_v2.utils.funding import (
     funding_diff_pct as util_funding_diff_pct,
     minutes_to_next_funding as util_minutes_to_next_funding,
@@ -55,16 +54,13 @@ class ExecutionConfig(BaseModel):
     fill_timeout_sec: int = 180
 
 
-class RiskConfig(BaseModel):
-    max_groups_per_pair: int = 2
-
-
 class ExitConfig(BaseModel):
     fr_spread_below_pct: Optional[Decimal] = None
     hold_below_sec: int = 60
     closing_non_profitable_wait_sec: int = 3600
     liquidation_limit_close_pct: Decimal = Decimal("10")
     liquidation_market_close_pct: Decimal = Decimal("2")
+    stop_cooldown_sec: int = 300
 
 
 class FundingRateArbControllerConfig(ControllerConfigBase):
@@ -74,7 +70,6 @@ class FundingRateArbControllerConfig(ControllerConfigBase):
     pairs: List[PairConfig] = []
     signal: SignalConfig = SignalConfig()
     execution: ExecutionConfig = ExecutionConfig()
-    risk: RiskConfig = RiskConfig()
     exit: ExitConfig = ExitConfig()
 
     def update_markets(self, markets: MarketDict) -> MarketDict:
@@ -102,7 +97,6 @@ class FundingRateArbController(ControllerBase):
         self.config: FundingRateArbControllerConfig
         self._last_entry_ts_by_pair = {}
         self._base_stop_ts: Dict[str, float] = {}
-        self._stop_cooldown_sec: int = 300
 
         try:
             prefix = "[Controller]"
@@ -143,71 +137,48 @@ class FundingRateArbController(ControllerBase):
             if len(connectors) < 2:
                 continue
 
-            active_for_base = False
-            for ei in self.executors_info:
-                if not ei.is_active or ei.is_done:
-                    continue
-                cfg = getattr(ei, "config", None)
-                maker_market = getattr(cfg, "maker_market", None)
-                if maker_market is None:
-                    continue
-                trading_pair = getattr(maker_market, "trading_pair", "")
-                if "-" not in trading_pair:
-                    continue
-                maker_base = trading_pair.split("-", 1)[0]
-                if maker_base == pair_config.base:
-                    active_for_base = True
-                    break
-            if active_for_base:
-                continue
-
             for connector_name in connectors:
                 quote = pair_config.per_exchange_quote.get(connector_name)
                 if not quote:
                     continue
-                trading_pair = f"{pair_config.base}-{quote}"
-                _ = self.market_data_provider.get_price_by_type(connector_name, trading_pair, PriceType.MidPrice)
 
-            for entry_ex in connectors:
-                entry_quote = pair_config.per_exchange_quote.get(entry_ex)
-                if not entry_quote:
+            for connector_a in connectors:
+                quote_a = pair_config.per_exchange_quote.get(connector_a)
+                if not quote_a:
                     continue
-                entry_tp = f"{pair_config.base}-{entry_quote}"
+                trading_pair_a = f"{pair_config.base}-{quote_a}"
 
-                for hedge_ex in connectors:
-                    if hedge_ex == entry_ex:
+                for connector_b in connectors:
+                    if connector_b == connector_a:
                         continue
-                    hedge_quote = pair_config.per_exchange_quote.get(hedge_ex)
-                    if not hedge_quote:
+                    quote_b = pair_config.per_exchange_quote.get(connector_b)
+                    if not quote_b:
                         continue
-                    hedge_tp = f"{pair_config.base}-{hedge_quote}"
-
-                    _ = self.market_data_provider.get_price_by_type(hedge_ex, hedge_tp, PriceType.MidPrice)
+                    trading_pair_b = f"{pair_config.base}-{quote_b}"
 
                     metrics = self._compute_pair_metrics(
-                        pair_config=pair_config,
-                        entry_connector=entry_ex,
-                        entry_trading_pair=entry_tp,
-                        hedge_connector=hedge_ex,
-                        hedge_trading_pair=hedge_tp,
+                        connector_a=connector_a,
+                        trading_pair_a=trading_pair_a,
+                        connector_b=connector_b,
+                        trading_pair_b=trading_pair_b,
                         current_ts=current_ts,
                     )
 
-                    pair_metrics[(pair_config.base, entry_ex, entry_tp, hedge_ex, hedge_tp)] = metrics
+                    pair_metrics[(pair_config.base, connector_a, trading_pair_a, connector_b, trading_pair_b)] = metrics
 
-                    entry_rate_sec = metrics.get("entry_rate_sec")
-                    hedge_rate_sec = metrics.get("hedge_rate_sec")
+                    rate_a_sec = metrics.get("rate_a_sec")
+                    rate_b_sec = metrics.get("rate_b_sec")
                     funding_rate_diff_pct = metrics.get("funding_rate_diff_pct")
                     funding_interval_hours = getattr(self.config.signal, "funding_profitability_interval_hours", self.DEFAULT_FUNDING_PROFITABILITY_INTERVAL_HOURS)
-                    entry_rate_pct_for_funding_interval_hours = entry_rate_sec * 3600 * 100 * funding_interval_hours if entry_rate_sec is not None else None
-                    hedge_rate_pct_for_funding_interval_hours = hedge_rate_sec * 3600 * 100 * funding_interval_hours if hedge_rate_sec is not None else None
-                    if entry_rate_sec is not None and hedge_rate_sec is not None:
-                        entry_rate_pct_for_funding_interval_hours_str = f"{entry_rate_pct_for_funding_interval_hours:.6f}"
-                        hedge_rate_pct_for_funding_interval_hours_str = f"{hedge_rate_pct_for_funding_interval_hours:.6f}"
+                    rate_a_pct_for_funding_interval_hours = rate_a_sec * 3600 * 100 * funding_interval_hours if rate_a_sec is not None else None
+                    rate_b_pct_for_funding_interval_hours = rate_b_sec * 3600 * 100 * funding_interval_hours if rate_b_sec is not None else None
+                    if rate_a_sec is not None and rate_b_sec is not None:
+                        rate_a_pct_for_funding_interval_hours_str = f"{rate_a_pct_for_funding_interval_hours:.6f}"
+                        rate_b_pct_for_funding_interval_hours_str = f"{rate_b_pct_for_funding_interval_hours:.6f}"
                         funding_diff_str = "n/a" if funding_rate_diff_pct is None else f"{funding_rate_diff_pct:.6f}"
-                        trade_side = metrics.get("trade_side")
+                        orientation_side = metrics.get("orientation_side")
                         self.logger().info(
-                            f"[Funding] base={pair_config.base} entry={entry_ex} rate_int={entry_rate_pct_for_funding_interval_hours_str} hedge={hedge_ex} rate_int={hedge_rate_pct_for_funding_interval_hours_str} diff={funding_diff_str} side={getattr(trade_side, 'name', '-')}"
+                            f"[Funding] base={pair_config.base} side_a={connector_a} rate_int={rate_a_pct_for_funding_interval_hours_str} side_b={connector_b} rate_int={rate_b_pct_for_funding_interval_hours_str} diff={funding_diff_str} side={getattr(orientation_side, 'name', '-')}"
                         )
 
         self.processed_data["pair_metrics"] = pair_metrics
@@ -237,16 +208,6 @@ class FundingRateArbController(ControllerBase):
                 count += 1
         return count
 
-    def get_active_executors_for_trading_pair(self, trading_pair: str) -> List[ExecutorInfo]:
-        active_executors = self.filter_executors(
-            executors=self.executors_info,
-            filter_func=lambda e: (
-                e.is_active and
-                e.trading_pair == trading_pair
-            )
-        )
-        return active_executors
-
     def determine_executor_actions(self) -> List[ExecutorAction]:
         actions: List[ExecutorAction] = []
         pair_metrics_map: Dict[tuple, Dict] = self.processed_data.get("pair_metrics", {})
@@ -273,22 +234,19 @@ class FundingRateArbController(ControllerBase):
                 continue
 
             stop_ts = self._base_stop_ts.get(pair_config.base)
-            if stop_ts is not None and (now_ts_global - stop_ts) < self._stop_cooldown_sec:
-                remain = int(self._stop_cooldown_sec - (now_ts_global - stop_ts))
+            stop_cooldown_sec = getattr(self.config.exit, "stop_cooldown_sec")
+            if stop_ts is not None and (now_ts_global - stop_ts) < stop_cooldown_sec:
+                remain = int(stop_cooldown_sec - (now_ts_global - stop_ts))
                 self.logger().info(f"[Skip] cooldown after stop base={pair_config.base} remain={remain}s")
                 continue
 
-            max_groups = getattr(self.config.risk, "max_groups_per_pair", None)
-            if max_groups and max_groups > 0 and self._count_active_groups_for_base(pair_config.base) >= max_groups:
-                continue
-
             combos: List[tuple] = []
-            for (base, entry_ex, entry_tp, hedge_ex, hedge_tp), metrics in pair_metrics_map.items():
+            for (base, connector_a, trading_pair_a, connector_b, trading_pair_b), metrics in pair_metrics_map.items():
                 if base != pair_config.base:
                     continue
-                if entry_ex not in connectors or hedge_ex not in connectors:
+                if connector_a not in connectors or connector_b not in connectors:
                     continue
-                combos.append(((entry_ex, entry_tp, hedge_ex, hedge_tp), metrics))
+                combos.append(((connector_a, trading_pair_a, connector_b, trading_pair_b), metrics))
 
             if not combos:
                 continue
@@ -301,46 +259,68 @@ class FundingRateArbController(ControllerBase):
 
             combos.sort(key=lambda item: _score(item[1]), reverse=True)
 
-            for (entry_ex, entry_tp, hedge_ex, hedge_tp), metrics in combos:
-                entry_mid = self.market_data_provider.get_price_by_type(entry_ex, entry_tp, PriceType.MidPrice)
-                if entry_mid.is_nan() or entry_mid <= 0:
+            for (connector_a, trading_pair_a, connector_b, trading_pair_b), metrics in combos:
+                mid_a = self.market_data_provider.get_price_by_type(connector_a, trading_pair_a, PriceType.MidPrice)
+                if mid_a.is_nan() or mid_a <= 0:
                     continue
 
                 funding_rate_diff_pct = metrics.get("funding_rate_diff_pct")
                 if funding_rate_diff_pct is None:
-                    self.logger().info(f"[Skip] funding diff unavailable {entry_tp} {entry_ex}->{hedge_ex}")
+                    self.logger().info(f"[Skip] funding diff unavailable {trading_pair_a} {connector_a}->{connector_b}")
                     continue
 
                 if funding_rate_diff_pct < self.config.signal.min_funding_rate_profitability_pct:
                     self.logger().info(
-                        f"[Skip] below threshold {entry_tp} {entry_ex}->{hedge_ex} diff={funding_rate_diff_pct:.6f} threshold={self.config.signal.min_funding_rate_profitability_pct:.6f}"
+                        f"[Skip] below threshold {trading_pair_a} {connector_a}->{connector_b} diff={funding_rate_diff_pct:.6f} threshold={self.config.signal.min_funding_rate_profitability_pct:.6f}"
                     )
                     continue
 
-                active_for_pair = self.get_active_executors_for_trading_pair(entry_tp)
-                if any(not ei.is_done for ei in active_for_pair):
-                    self.logger().info(f"[Skip] already active {entry_tp} {entry_ex}->{hedge_ex}")
+                active_with_connectors = self.filter_executors(
+                    executors=self.executors_info,
+                    filter_func=lambda e: (
+                        e.is_active
+                        and not e.is_done
+                        and getattr(e, "config", None) is not None
+                        and (
+                            getattr(getattr(e.config, "maker_market", None), "connector_name", None) in {connector_a, connector_b}
+                            or getattr(getattr(e.config, "hedge_market", None), "connector_name", None) in {connector_a, connector_b}
+                        )
+                    )
+                )
+
+                if any(active_with_connectors):
+                    self.logger().info(
+                        f"[Skip] already active for at least one of connectors "
+                        f"{connector_a}, {connector_b} on {trading_pair_a}"
+                    )
                     continue
 
                 now_ts = self.market_data_provider.time()
-                cooldown_key = (entry_ex, entry_tp)
+                cooldown_key = (connector_a, trading_pair_a)
                 last_ts = self._last_entry_ts_by_pair.get(cooldown_key, 0)
                 if now_ts - last_ts < self.config.execution.entry_cooldown_sec:
-                    self.logger().info(f"[Skip] cooldown {entry_tp} {entry_ex}->{hedge_ex}")
+                    self.logger().info(f"[Skip] cooldown {trading_pair_a} {connector_a}->{connector_b}")
                     continue
 
-                self.logger().info(f"[Check] cooldown passed {entry_tp} {entry_ex}->{hedge_ex}")
+                self.logger().info(f"[Check] cooldown passed {trading_pair_a} {connector_a}->{connector_b}")
                 pair_cap_usd: Decimal = pair_config.total_notional_usd_per_pair if pair_config.total_notional_usd_per_pair > 0 else self.config.execution.total_notional_usd
                 if active_alloc_usd + pair_cap_usd > self.config.execution.total_notional_usd:
-                    self.logger().info(f"[Skip] allocation exceed {entry_tp} {entry_ex}->{hedge_ex}")
+                    self.logger().info(f"[Skip] allocation exceed {trading_pair_a} {connector_a}->{connector_b}")
                     continue
 
-                maker_side = metrics.get("trade_side", TradeType.BUY)
+                maker_connector, maker_trading_pair, hedge_connector, hedge_trading_pair, maker_side = self._select_maker_hedge_for_pair(
+                    base=pair_config.base,
+                    connector_a=connector_a,
+                    trading_pair_a=trading_pair_a,
+                    connector_b=connector_b,
+                    trading_pair_b=trading_pair_b,
+                    metrics=metrics,
+                )
 
                 exec_cfg = MakerHedgeSingleExecutorConfig(
                     timestamp=self.market_data_provider.time(),
-                    maker_market=ConnectorPair(connector_name=entry_ex, trading_pair=entry_tp),
-                    hedge_market=ConnectorPair(connector_name=hedge_ex, trading_pair=hedge_tp),
+                    maker_market=ConnectorPair(connector_name=maker_connector, trading_pair=maker_trading_pair),
+                    hedge_market=ConnectorPair(connector_name=hedge_connector, trading_pair=hedge_trading_pair),
                     side_maker=maker_side.name,
                     controller_id=self.config.id,
                     leverage=self.config.execution.leverage,
@@ -364,7 +344,7 @@ class FundingRateArbController(ControllerBase):
 
                 actions.append(CreateExecutorAction(executor_config=exec_cfg, controller_id=self.config.id))
                 self.logger().info(
-                    f"[Enter] {entry_tp} {entry_ex}->{hedge_ex} side={maker_side.name} diff={(f'{funding_rate_diff_pct:.6f}' if funding_rate_diff_pct is not None else 'n/a')} cap_usd={pair_cap_usd:.2f}"
+                    f"[Enter] {maker_trading_pair} {maker_connector}->{hedge_connector} side={maker_side.name} diff={(f'{funding_rate_diff_pct:.6f}' if funding_rate_diff_pct is not None else 'n/a')} cap_usd={pair_cap_usd:.2f}"
                 )
 
                 self._last_entry_ts_by_pair[cooldown_key] = now_ts
@@ -372,64 +352,68 @@ class FundingRateArbController(ControllerBase):
                 break
         return actions
 
-    def _normalized_funding_rate_in_seconds(self, funding_info, connector: str) -> Optional[Decimal]:
-        return util_normalized_funding_rate_in_seconds(
-            funding_info=funding_info,
-            connector=connector,
-            fallbacks=self.FUNDING_INTERVAL_FALLBACKS,
-        )
-
-    @staticmethod
-    def _minutes_to_next_funding(next_funding_timestamp: Optional[int], current_ts: float) -> Optional[Decimal]:
-        return util_minutes_to_next_funding(next_funding_timestamp, current_ts)
+    def _select_maker_hedge_for_pair(
+        self,
+        base: str,
+        connector_a: str,
+        trading_pair_a: str,
+        connector_b: str,
+        trading_pair_b: str,
+        metrics: Dict[str, Any],
+    ):
+        maker_connector = connector_a
+        maker_trading_pair = trading_pair_a
+        hedge_connector = connector_b
+        hedge_trading_pair = trading_pair_b
+        maker_side = metrics.get("orientation_side", TradeType.BUY)
+        return maker_connector, maker_trading_pair, hedge_connector, hedge_trading_pair, maker_side
 
     def _compute_pair_metrics(
         self,
-        pair_config: PairConfig,
-        entry_connector: str,
-        entry_trading_pair: str,
-        hedge_connector: str,
-        hedge_trading_pair: str,
+        connector_a: str,
+        trading_pair_a: str,
+        connector_b: str,
+        trading_pair_b: str,
         current_ts: float,
     ) -> Dict[str, Any]:
         metrics: Dict[str, Any] = {
             "funding_rate_diff_pct": None,
-            "trade_side": TradeType.BUY,
-            "entry_rate_sec": None,
-            "hedge_rate_sec": None,
-            "entry_minutes_to_funding": None,
-            "hedge_minutes_to_funding": None,
+            "orientation_side": TradeType.BUY,
+            "rate_a_sec": None,
+            "rate_b_sec": None,
+            "minutes_to_funding_a": None,
+            "minutes_to_funding_b": None,
         }
 
-        entry_funding = self.market_data_provider.get_funding_info(entry_connector, entry_trading_pair)
-        if entry_funding is None:
-            self.logger().info(f"[Funding] entry funding missing {entry_connector}:{entry_trading_pair}")
-        hedge_funding = self.market_data_provider.get_funding_info(hedge_connector, hedge_trading_pair)
-        if hedge_funding is None:
-            self.logger().info(f"[Funding] hedge funding missing {hedge_connector}:{hedge_trading_pair}")
+        funding_a = self.market_data_provider.get_funding_info(connector_a, trading_pair_a)
+        funding_b = self.market_data_provider.get_funding_info(connector_b, trading_pair_b)
 
-        if entry_funding is None or hedge_funding is None:
+        if funding_a is None or funding_b is None:
+            self.logger().info(
+                f"[Funding] missing for pair {connector_a}:{trading_pair_a} / "
+                f"{connector_b}:{trading_pair_b} (a={funding_a is not None}, b={funding_b is not None})"
+            )
             return metrics
 
-        entry_rate_sec = self._normalized_funding_rate_in_seconds(entry_funding, entry_connector)
-        hedge_rate_sec = self._normalized_funding_rate_in_seconds(hedge_funding, hedge_connector)
+        rate_a_sec = util_normalized_funding_rate_in_seconds(funding_a, connector_a)
+        rate_b_sec = util_normalized_funding_rate_in_seconds(funding_b, connector_b)
 
-        metrics["entry_rate_sec"] = entry_rate_sec
-        metrics["hedge_rate_sec"] = hedge_rate_sec
-
-        if entry_rate_sec is None or hedge_rate_sec is None:
+        if rate_a_sec is None or rate_b_sec is None:
             return metrics
+
+        metrics["rate_a_sec"] = rate_a_sec
+        metrics["rate_b_sec"] = rate_b_sec
 
         interval_hours = self.config.signal.funding_profitability_interval_hours or self.DEFAULT_FUNDING_PROFITABILITY_INTERVAL_HOURS
-        diff_pct_signed = util_funding_diff_pct(entry_rate_sec, hedge_rate_sec, hours=int(interval_hours))
+        diff_pct_signed = util_funding_diff_pct(rate_a_sec, rate_b_sec, hours=int(interval_hours))
         funding_rate_diff_pct = abs(Decimal(str(diff_pct_signed))) if diff_pct_signed is not None else None
 
         metrics["funding_rate_diff_pct"] = funding_rate_diff_pct
-        trade_side = TradeType.BUY if entry_rate_sec < hedge_rate_sec else TradeType.SELL
-        metrics["trade_side"] = trade_side
+        orientation_side = TradeType.BUY if rate_a_sec < rate_b_sec else TradeType.SELL
+        metrics["orientation_side"] = orientation_side
 
-        metrics["entry_minutes_to_funding"] = self._minutes_to_next_funding(entry_funding.next_funding_utc_timestamp, current_ts)
-        metrics["hedge_minutes_to_funding"] = self._minutes_to_next_funding(hedge_funding.next_funding_utc_timestamp, current_ts)
+        metrics["minutes_to_funding_a"] = util_minutes_to_next_funding(funding_a.next_funding_utc_timestamp, current_ts)
+        metrics["minutes_to_funding_b"] = util_minutes_to_next_funding(funding_b.next_funding_utc_timestamp, current_ts)
 
         return metrics
 
