@@ -60,7 +60,7 @@ class HedgeHelper:
         if mid.is_nan() or mid <= 0:
             return
         notional = q_amt * mid
-        min_notional = getattr(self.exe.config, "hedge_min_notional_usd", Decimal("0"))
+        min_notional = self.exe.hedge_min_notional_usd
         if notional < min_notional:
             return
         self.market_hedge(q_amt)

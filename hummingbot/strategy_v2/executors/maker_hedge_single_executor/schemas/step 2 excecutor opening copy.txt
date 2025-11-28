@@ -1,0 +1,123 @@
+flowchart TB
+    %% ========= ENTRY POINT =========
+    E0([Executor Created]) --> E1[on_start:<br>Set _start_ts<br>Reset _last_fill_ts<br>Set Hedge Mode]
+    E1 --> E2([control_task tick])
+
+    %% ========= MAIN CONTROL LOOP =========
+    E2 --> E3[Risk Setup:<br>ensure_position_mode<br>apply_leverage_once]
+    E3 --> E4{"_opening_fully_completed<br>OR<br>_closing?"}
+
+    %% --- Monitoring Path ---
+    E4 -- Yes --> M0[Monitoring/Closing Phase<br>See Monitoring Flowchart]
+    M0 --> E2
+
+    %% --- Opening Path ---
+    E4 -- No --> E5[handle_close_ttl]
+    E5 --> E6[Check Timeouts:<br>fill_timeout_sec<br>age_start / age_last_fill]
+
+    %% --- Timeout Logic ---
+    E6 -- "No fills & Timeout" --> T1[Early Stop<br>keep_position=False]
+    T1 --> Stop([STOPPED])
+
+    E6 -- "Partial fills & Timeout" --> T2[Cancel Open Orders<br>Set _opening_fully_completed = True]
+    T2 --> M0
+
+    E6 -- "No Timeout" --> E7[get_last_active_unfilled_order]
+
+    E11 -- No --> W1[Wait: Cooldown]
+
+    %% --- New Order Logic ---
+    E8 -- No --> E10[Check Capacity & Balance]
+    E8 -- Yes --> W0[Compute Next Order]
+    E7 -- "No Unfilled Order" --> E8{"_maker_pending_ids<br>Not Empty?"}
+    W0 --> E2
+
+    %% --- Active Order Check ---
+    E7 -- "Has Unfilled Order" --> U1{"TTL Exceeded?"}
+    U1 -- Yes --> U2[Cancel Order<br>Add to cancel_pending]
+    U2 --> E2
+    U1 -- No --> E2
+
+    E10a -- Yes --> E10b[Validate Balance]
+    E10b --> E11{"Cooldown Ready?<br>now >= _next_order_ready_ts"}
+
+    W1 --> E2
+
+    E10 --> E10a{"Enough Maker Cap?"}
+    E10a -- No --> C1[Set _opening_fully_completed = True]
+    C1 --> M0
+
+    %% --- Order Computation ---
+    E11 -- Yes --> E12[Compute Next Order]
+    E12 --> E12a{"Mid Price Valid?"}
+    E12a -- Yes --> E12c[Calculate Amount & Quantize]
+    E12a -- No --> W2[Wait: Invalid Price]
+    W2 --> E2
+
+    E12c --> E12d{"Amount > 0?"}
+    E12d -- No --> C2[Set _opening_fully_completed = True<br>Amount too small]
+    C2 --> M0
+
+    E14 -- Yes --> P_Calc[Calc Fees & Trade PnL]
+    E12d -- Yes --> E13[Compute Limit Price]
+    E13 --> E14{"Price & Min Notional OK?"}
+    E14 -- No --> W3[Wait: Invalid Price/Notional]
+    W3 --> E2
+
+    %% --- Profitability Check (Detailed) ---
+    P_Calc --> P_Net[Net PnL = Trade PnL - Fees]
+    P_Net --> P_Check1{"Net PnL > 0?"}
+
+    P_Check1 -- Yes --> P_Pass[Update last_profitable_ts]
+
+    P_Check1 -- No --> P_Fund[Get Funding Diff]
+    P_Fund --> P_Check2{"Net PnL + Funding > 0?"}
+
+    P_Check2 -- Yes --> P_Pass
+    P_Check2 -- No --> P_Fail{"Wait Time Exceeded?"}
+
+    P_Pass --> PlaceOrder
+
+    P_Fail -- Yes --> P_Timeout{"Any Position Open?"}
+    P_Fail -- No --> W4[Wait: Profitability Window]
+    W4 --> E2
+
+    P_Timeout -- No --> T3[Early Stop<br>Unprofitable & No Position]
+    T3 --> Stop
+
+    P_Timeout -- Yes --> P_Monitor[Set _opening_fully_completed = True<br>Enter Monitoring]
+    P_Monitor --> M0
+
+    %% --- Order Placement ---
+    PlaceOrder[Create TrackedOrder<br>place_order LIMIT_MAKER]
+    PlaceOrder --> PO1[Add to _maker_pending_ids]
+    PO1 --> PO2[Set _next_order_ready_ts]
+    PO2 --> E2
+
+    %% ========= ASYNC EVENTS =========
+    subgraph Events [Async Event Handlers]
+        direction TB
+
+        %% Maker Events
+        ME_Create[Maker Created] --> ME_C1[Update TrackedOrder<br>Remove from Pending]
+        ME_Fill[Maker Filled] --> ME_F1[Update Exposure<br>Trigger Hedge if needed]
+        ME_Complete[Maker Completed] --> ME_Cp1[Check Remaining Cap<br>If Done -> Finalize]
+
+        %% Hedge Events
+        HE_Fill[Hedge Filled] --> HE_F1[Update Hedge Exposure]
+        HE_Fail[Hedge Failed] --> HE_Fa1[Restore Accumulator<br>Retry Hedge]
+    end
+
+    %% Connect Events to Main Loop (Conceptual)
+    Events -.-> E2
+
+    %% Styling
+    classDef process fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:black;
+    classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:black;
+    classDef term fill:#ffebee,stroke:#c62828,stroke-width:2px,color:black;
+    classDef event fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:black;
+
+    class E1,E3,E5,E6,E7,E10,E10b,E12,E12c,E13,PlaceOrder,PO1,PO2,M0,T2,C1,C2,P_Pass,P_Monitor,U2,P_Calc,P_Net,P_Fund process;
+    class E4,E8,E10a,E11,E12a,E12d,E14,P_Check1,P_Check2,P_Fail,P_Timeout,U1 decision;
+    class Stop,T1,T3 term;
+    class Events,ME_Create,ME_Fill,ME_Complete,HE_Fill,HE_Fail event;

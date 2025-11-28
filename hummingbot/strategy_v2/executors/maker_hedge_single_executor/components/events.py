@@ -117,7 +117,7 @@ class EventsHelper:
                 exe.close_type = CloseType.COMPLETED
                 exe.stop()
             else:
-                exe._next_order_ready_ts = exe._strategy.current_timestamp + float(exe.config.order_interval_sec)
+                exe._next_order_ready_ts = exe._strategy.current_timestamp + float(exe.order_interval_sec)
             return
 
         if event.order_id in exe._maker_by_id:
@@ -127,7 +127,7 @@ class EventsHelper:
                 exe.close_type = CloseType.COMPLETED
                 exe.stop()
             else:
-                exe._next_order_ready_ts = exe._strategy.current_timestamp + float(exe.config.order_interval_sec)
+                exe._next_order_ready_ts = exe._strategy.current_timestamp + float(exe.order_interval_sec)
 
     def process_order_canceled(self, event_tag: int, market, event: OrderCancelledEvent):
         exe = self.exe
@@ -197,7 +197,7 @@ class EventsHelper:
             else:
                 exe.logger().warning(f"[Failure] Maker CLOSE order {order_id} failed ({err_msg}); nothing remaining to re-queue.")
             exe._closing_current = None
-            cooldown = float(getattr(exe.config, "post_place_cooldown_sec", 0.5))
+            cooldown = float(exe.post_place_cooldown_sec)
             exe._next_order_ready_ts = exe._strategy.current_timestamp + cooldown
 
         maker_tracked = exe._maker_by_id.get(order_id)
@@ -205,7 +205,7 @@ class EventsHelper:
             handled = True
             exe.logger().warning(f"[Failure] Maker order {order_id} failed ({err_msg}); scheduling retry.")
             exe.remove_order(order_id, is_maker=True)
-            cooldown = float(getattr(exe.config, "post_place_cooldown_sec", 0.5))
+            cooldown = float(exe.post_place_cooldown_sec)
             exe._next_order_ready_ts = exe._strategy.current_timestamp + cooldown
 
         hedge_tracked = exe._hedge_by_id.get(order_id)

@@ -16,17 +16,20 @@ class OrdersHelper:
     def __init__(self, executor: 'MakerHedgeSingleExecutor'):
         self.exe = executor
 
-    def compute_limit_price(self, side: TradeType, mid: Optional[Decimal] = None) -> Optional[Decimal]:
-        if mid is None:
-            mid_val = self.exe.get_price(self.exe.maker_connector, self.exe.maker_pair, PriceType.MidPrice)
-            mid = None if mid_val.is_nan() else mid_val
-        if mid is None or mid <= 0:
+    def compute_limit_price(self, side: TradeType) -> Optional[Decimal]:
+        price_type = PriceType.BestBid if side == TradeType.BUY else PriceType.BestAsk
+        base_price = self.exe.get_price(self.exe.maker_connector, self.exe.maker_pair, price_type)
+        self.exe.logger().info(f"[Order] Base price: {base_price}")
+        if base_price.is_nan() or base_price <= 0:
             return None
-        off = (self.exe.config.maker_price_offset_pct / Decimal("100"))
+
+        off = (self.exe.maker_price_offset_pct / Decimal("100"))
         if side == TradeType.BUY:
-            return mid * (Decimal("1") - off)
+            self.exe.logger().info(f"[Order] Limit price: {base_price * (Decimal("1") - off)}")
+            return base_price * (Decimal("1") - off)
         else:
-            return mid * (Decimal("1") + off)
+            self.exe.logger().info(f"[Order] Limit price: {base_price * (Decimal("1") + off)}")
+            return base_price * (Decimal("1") + off)
 
     async def validate_sufficient_balance(self):
         mid = self.exe.get_price(self.exe.maker_connector, self.exe.maker_pair, PriceType.MidPrice)
@@ -35,15 +38,15 @@ class OrdersHelper:
             return
         base, quote = self.exe.maker_pair.split("-")
 
-        self.exe.logger().info(f"[Config] pair_notional_usd_cap: {self.exe.config.pair_notional_usd_cap}, per_order_max_notional_usd: {self.exe.config.per_order_max_notional_usd}, leverage: {self.exe.config.leverage}")
+        self.exe.logger().info(f"[Config] pair_notional_usd_cap: {self.exe.pair_notional_usd_cap}, per_order_max_notional_usd: {self.exe.per_order_max_notional_usd}, leverage: {self.exe.leverage}")
         remaining_cap = self.exe.get_remaining_maker_cap()
         self.exe.logger().info(f"[Validation] Sufficient {quote} margin for next order; remaining cap ${remaining_cap:.2f}")
         if not self.exe.is_enough_maker_cap(remaining_cap):
-            self.exe.logger().warning(f"[Validation] Not enough remaining maker cap to place new order, remaining cap: ${remaining_cap:.2f}, need at least: ${self.exe.config.per_order_min_notional_usd:.2f}. Completing executor.")
+            self.exe.logger().warning(f"[Validation] Not enough remaining maker cap to place new order, remaining cap: ${remaining_cap:.2f}, need at least: ${self.exe.per_order_min_notional_usd:.2f}. Completing executor.")
             return
 
-        next_notional_usd = min(remaining_cap, Decimal(str(self.exe.config.per_order_max_notional_usd)))
-        leverage = self.exe.config.leverage if getattr(self.exe.config, "leverage", None) is not None else Decimal("1")
+        next_notional_usd = min(remaining_cap, Decimal(str(self.exe.per_order_max_notional_usd)))
+        leverage = self.exe.leverage if getattr(self.exe, "leverage", None) is not None else Decimal("1")
         if leverage <= 0:
             leverage = Decimal("1")
         required_margin = Decimal(str(next_notional_usd)) / leverage
@@ -56,10 +59,6 @@ class OrdersHelper:
 
     async def place_next_part(self):
         exe = self.exe
-        mid = exe.get_price(exe.maker_connector, exe.maker_pair, PriceType.MidPrice)
-        if mid.is_nan() or mid <= 0:
-            return
-
         maker_side: TradeType = exe._get_maker_side_for_mode()
 
         if exe._closing:
@@ -84,13 +83,13 @@ class OrdersHelper:
                 exe.close_type = CloseType.COMPLETED
                 exe.stop()
                 return
-            px_preview = self.compute_limit_price(maker_side, mid)
+            px_preview = self.compute_limit_price(maker_side)
             if px_preview is None or px_preview <= 0:
                 return
-            next_notional_usd = min(remaining_cap, Decimal(str(exe.config.per_order_max_notional_usd)))
+            next_notional_usd = min(remaining_cap, Decimal(str(exe.per_order_max_notional_usd)))
             exe.logger().info(f"[Order] Next notional USD: ${next_notional_usd:.2f} at limit px {px_preview:.8f}")
             raw_amount = Decimal(str(next_notional_usd)) / px_preview
-            maker_min_notional = getattr(exe.config, "maker_min_notional_usd", Decimal("0"))
+            maker_min_notional = exe.maker_min_notional_usd
             if maker_min_notional and next_notional_usd < maker_min_notional:
                 exe.logger().info(f"[Order] Skip maker OPEN: below min notional ${maker_min_notional}")
                 return
@@ -105,7 +104,7 @@ class OrdersHelper:
             amt_q = raw_amount
         amount = amt_q
 
-        px = self.compute_limit_price(maker_side, mid)
+        px = self.compute_limit_price(maker_side)
         if px is None or px <= 0:
             return
         if not exe._closing:
@@ -128,7 +127,7 @@ class OrdersHelper:
         exe.logger().info(f"[Order] Placing maker {mode_desc} qty={amount} @ {px:.8f} (profitability check: {'pass' if is_profitability_check_passed else 'fail'})")
 
         now_ts = int(exe._strategy.current_timestamp)
-        wait_sec = float(getattr(exe.config, "non_profitable_wait_sec", 60.0))
+        wait_sec = float(exe.non_profitable_wait_sec)
 
         if exe._profitability_helper.is_profitable_on_last_check is None:
             exe._profitability_helper.is_profitable_on_last_check = True
@@ -136,16 +135,16 @@ class OrdersHelper:
             exe._profitability_helper.last_profitable_ts = now_ts
 
         if exe._closing:
-            close_wait_sec = float(getattr(exe.config, "closing_non_profitable_wait_sec", 3600.0))
+            close_wait_sec = float(exe.closing_non_profitable_wait_sec)
             if exe._closing_no_wait:
                 exe.logger().info("[Close] No-wait flag set; bypassing profitability wait due to risk trigger.")
                 try:
-                    setattr(exe, "_closing_wait_started_ts", None)
+                    exe._closing_wait_started_ts = None
                 except Exception:
                     pass
             else:
                 if not is_profitability_check_passed:
-                    start_ts = getattr(exe, "_closing_wait_started_ts", None)
+                    start_ts = exe._closing_wait_started_ts
                     if start_ts is None:
                         exe._closing_wait_started_ts = now_ts
                         exe.logger().info(f"[Close] Not profitable yet; starting up-to-{int(close_wait_sec)}s wait before forcing close.")
@@ -161,7 +160,7 @@ class OrdersHelper:
                         exe.logger().info(f"[Close] Waited {int(elapsed_close)}s; forcing close without profitability condition.")
                 else:
                     try:
-                        setattr(exe, "_closing_wait_started_ts", None)
+                        exe._closing_wait_started_ts = None
                     except Exception:
                         pass
         else:
@@ -216,6 +215,6 @@ class OrdersHelper:
         else:
             exe.add_order(new_tracked, is_maker=True)
             exe._maker_pending_ids.add(order_id)
-            cooldown = float(getattr(exe.config, "post_place_cooldown_sec", 0.5))
+            cooldown = float(exe.post_place_cooldown_sec)
             exe._next_order_ready_ts = exe._strategy.current_timestamp + cooldown
             exe.logger().info(f"[Order] Placed maker {mode_desc} id={order_id} type=LIMIT px={px} amt={amount}")

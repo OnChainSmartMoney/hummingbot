@@ -1,0 +1,68 @@
+flowchart TD
+    %% ===== NODES =====
+    Start([control_task tick])
+    CheckStatus{"Status RUNNING<br>AND<br>opening_completed<br>AND<br>NOT closing?"}
+
+    %% Monitoring Phase
+    MonStart[Monitoring Phase]
+
+    %% Liquidation
+    CalcLiq[Calculate Liquidation Distances<br>Maker & Hedge]
+    CheckEmerg{"Distance <= Market Trigger?<br>(Emergency)"}
+    EmergAction[close_all_positions_by_market<br>STOP Executor]
+    CheckLimit{"Distance <= Limit Trigger?<br>(Limit Close)"}
+    LimitAction[Set _closing = True<br>Set _closing_no_wait = True<br>build_close_queue]
+
+    %% Funding
+    CalcFund[Fetch Funding Rates<br>Calc Oriented Diff %]
+    CheckFund{"Diff <= Threshold?"}
+    TimerActive{"Timer Running?"}
+    StartTimer[Start/Continue Timer]
+    CheckTimer{"Timer > Hold Sec?"}
+    FundAction[Set _closing = True<br>build_close_queue]
+    ResetTimer[Reset Timer]
+
+    %% Endings
+    EndTick([End Tick / Return])
+    NextTick([Next Tick: Handle Closing])
+    Stop([STOPPED])
+
+    %% ===== EDGES =====
+    Start --> CheckStatus
+    CheckStatus -- No --> NextTick
+    CheckStatus -- Yes --> MonStart
+
+    MonStart --> CalcLiq
+    CalcLiq --> CheckEmerg
+
+    %% Liquidation Logic
+    CheckEmerg -- Yes --> EmergAction
+    EmergAction --> Stop
+
+    CheckEmerg -- No --> CheckLimit
+    CheckLimit -- Yes --> LimitAction
+    LimitAction --> CalcFund
+    CheckLimit -- No --> CalcFund
+
+    %% Funding Logic
+    CalcFund --> CheckFund
+    CheckFund -- No (Diff > Thresh) --> ResetTimer
+    ResetTimer --> EndTick
+
+    CheckFund -- Yes (Diff <= Thresh) --> TimerActive
+    TimerActive -- No --> StartTimer
+    StartTimer --> EndTick
+
+    TimerActive -- Yes --> CheckTimer
+    CheckTimer -- No (Keep Waiting) --> EndTick
+    CheckTimer -- Yes (Elapsed) --> FundAction
+    FundAction --> EndTick
+
+    %% Styling
+    classDef process fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:black;
+    classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:black;
+    classDef term fill:#ffebee,stroke:#c62828,stroke-width:2px,color:black;
+
+    class Start,MonStart,CalcLiq,CalcFund,EmergAction,LimitAction,StartTimer,FundAction,ResetTimer process;
+    class CheckStatus,CheckEmerg,CheckLimit,CheckFund,TimerActive,CheckTimer decision;
+    class Stop,EndTick,NextTick term;

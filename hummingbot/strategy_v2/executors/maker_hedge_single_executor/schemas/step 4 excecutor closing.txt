@@ -1,0 +1,93 @@
+flowchart TB
+    %% ===== ENTRY POINT =====
+    Start([control_task tick]) --> CheckClosing{"_closing is True?"}
+    CheckClosing -- No --> OpeningLogic[Go to Opening Logic]
+    CheckClosing -- Yes --> HandleTTL[handle_close_ttl]
+
+    %% ===== EMERGENCY MARKET CLOSE PATH =====
+    %% This can be triggered by LiquidationHelper at any time
+    subgraph MarketClose [Emergency / Market Close]
+        direction TB
+        TrigMarket[Trigger: Liquidation Market Threshold] --> LogMarket[Log: Closing by MARKET]
+        LogMarket --> CallClose[close_all_positions_by_market]
+        CallClose --> PlaceMarket[Place MARKET Order<br>Side: Opposite<br>Amount: Exposure]
+        PlaceMarket --> StopExec[STOP Executor<br>CloseType.EARLY_STOP]
+    end
+
+    %% Link from Monitoring (Conceptual)
+    OpeningLogic -.-> TrigMarket
+
+    %% ===== TTL CHECK =====
+    HandleTTL --> TTLCheck{"Active Close Order<br>AND<br>TTL Exceeded?"}
+    TTLCheck -- Yes --> CancelClose[Cancel Order<br>Re-queue Remaining Amount]
+    CancelClose --> EndTick([End Tick])
+    TTLCheck -- No --> BuildQueue
+
+    %% ===== QUEUE MANAGEMENT =====
+    BuildQueue[build_close_queue_if_needed] --> CheckCurrent{"_closing_current exists?"}
+    CheckCurrent -- Yes --> EndTick
+
+    CheckCurrent -- No --> CheckQueue{"_close_queue Empty?"}
+    CheckQueue -- Yes --> Finalize[finalize_hedge_tail]
+    Finalize --> Stop([STOP Executor<br>CloseType.COMPLETED])
+
+    %% ===== ORDER PREPARATION =====
+    CheckQueue -- No --> PopItem[Pop Item from Queue<br>open_id, amount]
+    PopItem --> CalcPrice[Compute Limit Price]
+    CalcPrice --> PriceValid{"Price Valid?"}
+    PriceValid -- No --> ReQueue[Re-queue Item]
+    ReQueue --> EndTick
+
+    %% ===== PROFITABILITY / WAIT LOGIC =====
+    PriceValid -- Yes --> CheckNoWait{"_closing_no_wait is True?"}
+
+    CheckNoWait -- Yes --> PlaceOrder
+
+    CheckNoWait -- No --> CheckProf{"check_profitability?"}
+    CheckProf -- Yes --> PlaceOrder
+
+    CheckProf -- No --> CheckWaitStarted{"Wait Started?"}
+    CheckWaitStarted -- No --> StartWait[Set _closing_wait_started_ts]
+    StartWait --> EndTick
+
+    CheckWaitStarted -- Yes --> CheckElapsed{"Wait > closing_non_profitable_wait_sec?"}
+    CheckElapsed -- No --> EndTick
+
+    CheckElapsed -- Yes --> PlaceOrder
+
+    %% ===== PLACING ORDER =====
+    PlaceOrder[place_order LIMIT_MAKER<br>Action=CLOSE<br>Amount=Queue Item Amount]
+    PlaceOrder --> SetCurrent[Set _closing_current:<br>open_id, close_order_id, placed_amount<br>Clear _closing_no_wait]
+    SetCurrent --> EndTick
+
+    %% ===== ASYNC EVENTS (Closing Specific) =====
+    subgraph Events [Async Closing Events]
+        direction TB
+        EC_Fill[Close Filled] --> EC_F1[Update executed_base<br>Add Fees]
+        EC_Cancel[Close Canceled] --> EC_C1[Calc Remaining = Placed - Executed]
+        EC_C1 --> EC_C2{Remaining > 0?}
+        EC_C2 -- Yes --> EC_C3[Re-queue Remaining]
+        EC_C2 -- No --> EC_C4[Nothing to Re-queue]
+
+        EC_Fail[Close Failed] --> EC_Fa1[Re-queue Remaining]
+
+        EC_Complete[Close Completed] --> EC_Cp1[Remove from Maker List<br>Clear _closing_current]
+        EC_Cp1 --> EC_Cp2{Queue Empty & No Open Orders?}
+        EC_Cp2 -- Yes --> EC_Cp3[finalize_hedge_tail<br>Stop Executor]
+        EC_Cp2 -- No --> EC_Cp4[Set next_order_ready_ts]
+    end
+
+    Events -.-> Start
+
+    %% Styling
+    classDef process fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:black;
+    classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:black;
+    classDef term fill:#ffebee,stroke:#c62828,stroke-width:2px,color:black;
+    classDef event fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:black;
+    classDef market fill:#ffcdd2,stroke:#b71c1c,stroke-width:2px,color:black;
+
+    class Start,HandleTTL,CancelClose,WaitTTL,BuildQueue,Finalize,PopItem,CalcPrice,ReQueue,StartWait,PlaceOrder,SetCurrent,EC_F1,EC_C1,EC_C3,EC_C4,EC_Fa1,EC_Cp1,EC_Cp3,EC_Cp4 process;
+    class CheckClosing,TTLCheck,CheckCurrent,CheckQueue,PriceValid,CheckNoWait,CheckProf,CheckWaitStarted,CheckElapsed,EC_C2,EC_Cp2 decision;
+    class Stop,EndTick,OpeningLogic,StopExec term;
+    class Events,EC_Fill,EC_Cancel,EC_Fail,EC_Complete event;
+    class MarketClose,TrigMarket,LogMarket,CallClose,PlaceMarket market;

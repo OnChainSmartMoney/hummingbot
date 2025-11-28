@@ -191,23 +191,6 @@ class FundingRateArbController(ControllerBase):
                 connectors.append(connector_name)
         return connectors
 
-    def _count_active_groups_for_base(self, base: str) -> int:
-        count = 0
-        for ei in self.executors_info:
-            if not ei.is_active or ei.is_done:
-                continue
-            cfg = getattr(ei, "config", None)
-            maker_market = getattr(cfg, "maker_market", None)
-            if maker_market is None:
-                continue
-            trading_pair = getattr(maker_market, "trading_pair", "")
-            if "-" not in trading_pair:
-                continue
-            maker_base = trading_pair.split("-", 1)[0]
-            if maker_base == base:
-                count += 1
-        return count
-
     def determine_executor_actions(self) -> List[ExecutorAction]:
         actions: List[ExecutorAction] = []
         pair_metrics_map: Dict[tuple, Dict] = self.processed_data.get("pair_metrics", {})

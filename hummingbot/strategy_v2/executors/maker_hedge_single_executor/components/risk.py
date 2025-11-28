@@ -35,7 +35,7 @@ class RiskHelper:
         if exe._leverage_applied:
             return
         try:
-            lev = int(exe.config.leverage) if getattr(exe.config, "leverage", None) is not None else 1
+            lev = int(exe.leverage) if getattr(exe, "leverage", None) is not None else 1
             if lev <= 0:
                 lev = 1
             ok1 = ok2 = True

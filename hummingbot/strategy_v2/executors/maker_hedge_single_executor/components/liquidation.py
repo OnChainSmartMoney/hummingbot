@@ -18,8 +18,8 @@ class LiquidationHelper:
 
     def monitor(self, now_ts: float):
         exe = self.exe
-        limit_trig = Decimal(str(getattr(exe.config, "liquidation_limit_close_pct", Decimal("5"))))
-        mkt_trig = Decimal(str(getattr(exe.config, "liquidation_market_close_pct", Decimal("1"))))
+        limit_trig = Decimal(str(exe.liquidation_limit_close_pct))
+        mkt_trig = Decimal(str(exe.liquidation_market_close_pct))
         if limit_trig <= 0 and mkt_trig <= 0:
             return
 
@@ -45,7 +45,7 @@ class LiquidationHelper:
 
             if liq_px is None:
                 try:
-                    lev = Decimal(str(getattr(exe.config, "leverage", Decimal("1"))))
+                    lev = Decimal(str(exe.leverage))
                 except Exception:
                     lev = Decimal("1")
                 if lev is None or lev <= 0:

@@ -115,7 +115,7 @@ class ExposureHelper:
     def get_remaining_maker_cap(self) -> Decimal:
         consumed = self.get_maker_order_usd_consumed()
         inflight = self.get_maker_order_usd_inflight()
-        remaining_cap = Decimal(str(self.exe.config.pair_notional_usd_cap)) - consumed - inflight
+        remaining_cap = Decimal(str(self.exe.pair_notional_usd_cap)) - consumed - inflight
         if remaining_cap < 0:
             remaining_cap = Decimal("0")
         return remaining_cap
@@ -123,7 +123,7 @@ class ExposureHelper:
     def is_enough_maker_cap(self, remaining_cap: Optional[Decimal]) -> bool:
         if remaining_cap is None:
             remaining_cap = self.get_remaining_maker_cap()
-        return remaining_cap >= Decimal(str(self.exe.config.per_order_min_notional_usd))
+        return remaining_cap >= Decimal(str(self.exe.per_order_min_notional_usd))
 
     def add_fee_quote(self, trade_fee, price_mid: Decimal, pair: str):
         try:

@@ -18,7 +18,7 @@ class ProfitabilityHelper:
         self.last_profitable_ts: float = 0.0
         self.should_open_positions: bool = True
         self.profitability_should_be_negative: bool = False
-        self.profitability_always_positive: bool = False
+        self.profitability_always_positive: bool = True
 
     def check_enter_condition(self, maker_side: TradeType, maker_price: Decimal, amount: Decimal) -> bool:
         if self.profitability_always_positive:
@@ -73,9 +73,13 @@ class ProfitabilityHelper:
             self.exe.logger().info(f"[Profitability] Net estimated PnL% after fees: {net_estimated_pnl_pct:.6f} (fees total {total_estimated_fees:.6f}) - PROFITABLE")
             return True
 
+        if self.exe._closing:
+            self.exe.logger().info("[Profitability] Closing mode - skipping funding-based profitability entry condition")
+            return False
+
         oriented_funding_diff_pct = self.exe._funding_helper.get_oriented_funding_diff_pct(funding_interval_hours=1)
         if oriented_funding_diff_pct is None:
-            self.exe.logger().warning("[Profitability] Funding rates unavailable - skipping profitability-based entry condition")
+            self.exe.logger().warning("[Profitability] Funding rates unavailable - skipping funding-based profitability entry condition")
             return False
 
         if (oriented_funding_diff_pct + net_estimated_pnl_pct) > Decimal("0"):

@@ -51,7 +51,7 @@ class FundingHelper:
             if entry_sec is None or hedge_sec is None:
                 self.exe.logger().info("Funding rates unavailable")
                 return None
-            funding_profitability_interval_hours = getattr(self.exe.config, "funding_profitability_interval_hours", 24) if funding_interval_hours is None else funding_interval_hours
+            funding_profitability_interval_hours = self.exe.funding_profitability_interval_hours if funding_interval_hours is None else funding_interval_hours
             diff_pct = util_funding_diff_pct(entry_sec, hedge_sec, hours=funding_profitability_interval_hours)
             if diff_pct is None:
                 return None
@@ -88,8 +88,8 @@ class FundingHelper:
                 f"[Funding monitoring] {self.exe.maker_pair} oriented_diff_pct(for position maker={'LONG' if self.exe.side_maker == TradeType.BUY else 'SHORT'}): {oriented_diff_pct}"
             )
 
-            pct_threshold = getattr(self.exe.config, "exit_funding_diff_pct_threshold", None)
-            hold_sec = getattr(self.exe.config, "exit_hold_below_sec", None)
+            pct_threshold = self.exe.exit_funding_diff_pct_threshold
+            hold_sec = self.exe.exit_hold_below_sec
 
             if oriented_diff_pct <= pct_threshold:
                 if self._funding_below_start_ts is None:

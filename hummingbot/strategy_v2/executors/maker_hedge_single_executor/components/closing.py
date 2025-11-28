@@ -78,10 +78,10 @@ class ClosingHelper:
 
     def handle_close_ttl(self, now: float):
         exe = self.exe
-        if not (exe._closing and exe._closing_current and (exe.config.maker_ttl_sec and exe.config.maker_ttl_sec > 0)):
+        if not (exe._closing and exe._closing_current and (exe.maker_ttl_sec and exe.maker_ttl_sec > 0)):
             return
         close_creation_ts = exe._closing_current.get("creation_ts", 0) or 0
-        if close_creation_ts > 0 and (now - close_creation_ts) >= float(exe.config.maker_ttl_sec):
+        if close_creation_ts > 0 and (now - close_creation_ts) >= float(exe.maker_ttl_sec):
             try:
                 close_id = exe._closing_current.get("close_order_id")
                 placed = exe._closing_current.get("placed_amount", Decimal("0"))

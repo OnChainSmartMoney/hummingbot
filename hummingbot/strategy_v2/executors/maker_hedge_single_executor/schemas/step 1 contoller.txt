@@ -1,0 +1,74 @@
+flowchart TB
+    %% ==========================================
+    %% PHASE 1: DATA UPDATE (update_processed_data)
+    %% ==========================================
+    subgraph DataUpdate [Phase 1: Update Processed Data]
+        direction TB
+        D0([Start update_processed_data]) --> D1[Iterate Config Pairs]
+        D1 --> D2{Connectors >= 2?}
+        D2 -- No --> D1
+        D2 -- Yes --> D3[Generate Combinations:<br>Connector A/B, Pair A/B]
+
+        D3 --> D4[Compute Pair Metrics:<br>Rates, Diff %, Orientation, Time to Funding]
+        D4 --> D5{Valid Metrics?}
+        D5 -- No --> D3
+        D5 -- Yes --> D6[Store in processed_data pair_metrics]
+        D6 --> D3
+    end
+
+    %% ==========================================
+    %% PHASE 2: DECISION (determine_executor_actions)
+    %% ==========================================
+    subgraph Decision [Phase 2: Determine Actions]
+        direction TB
+        A0([Start determine_executor_actions]) --> A1[Update Global State:<br>Base Stop Timestamps<br>Active Allocation USD]
+
+        A1 --> A2[Iterate Config Pairs]
+        A2 --> A3{Connectors >= 2?}
+        A3 -- No --> A2
+
+        %% --- Base Level Checks ---
+        A3 -- Yes --> A4{Base Stop Cooldown?<br>now - stop_ts < limit}
+        A4 -- Yes --> A2
+
+        %% --- Combination Ranking ---
+        A4 -- No --> A5[Get Valid Combinations for Base]
+        A5 --> A6[Sort by Funding Diff % Desc]
+        A6 --> A7[Iterate Sorted Combinations]
+
+        %% --- Combination Level Checks ---
+        A7 --> C0{Mid Price Valid?}
+        C0 -- No --> A7
+
+        C0 -- Yes --> C1{Diff >= Min Profitability?}
+        C1 -- No --> A7
+
+        C1 -- Yes --> C2{Already Active?<br>Executor exists for A or B}
+        C2 -- Yes --> A7
+
+        C2 -- No --> C3{Entry Cooldown?<br>now - last_entry < limit}
+        C3 -- Yes --> A7
+
+        C3 -- No --> C4[Calc Pair Capacity]
+        C4 --> C5{Global Allocation Exceeded?<br>active + pair_cap > total}
+        C5 -- Yes --> A7
+
+        %% --- Action Creation ---
+        C5 -- No --> Action[Select Maker/Hedge Side]
+        Action --> Config[Create Executor Config]
+        Config --> Create[Append CreateExecutorAction]
+        Create --> UpdateState[Update last_entry_ts<br>Add to active_alloc_usd]
+        UpdateState --> Break[Break Loop for this Base<br>1 executor per base per tick]
+        Break --> A2
+    end
+
+    %% Link Phases (Conceptual)
+    DataUpdate -.-> Decision
+
+    %% Styling
+    classDef process fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:black;
+    classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:black;
+    classDef term fill:#ffebee,stroke:#c62828,stroke-width:2px,color:black;
+
+    class D0,D1,D3,D4,D6,A0,A1,A2,A5,A6,A7,C4,Action,Config,Create,UpdateState,Break process;
+    class D2,D5,A3,A4,C0,C1,C2,C3,C5 decision;

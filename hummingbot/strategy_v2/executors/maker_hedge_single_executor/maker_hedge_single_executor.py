@@ -110,6 +110,27 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         self._maker_unrealized_pnl: Optional[Decimal] = None
         self._hedge_unrealized_pnl: Optional[Decimal] = None
 
+        self.maker_price_offset_pct = config.maker_price_offset_pct
+        self.pair_notional_usd_cap = config.pair_notional_usd_cap
+        self.per_order_max_notional_usd = config.per_order_max_notional_usd
+        self.per_order_min_notional_usd = config.per_order_min_notional_usd
+        self.leverage = config.leverage
+        self.non_profitable_wait_sec = getattr(config, "non_profitable_wait_sec", 60.0)
+        self.closing_non_profitable_wait_sec = getattr(config, "closing_non_profitable_wait_sec", 3600.0)
+        self.post_place_cooldown_sec = getattr(config, "post_place_cooldown_sec", 0.5)
+        self.maker_min_notional_usd = getattr(config, "maker_min_notional_usd", Decimal("0"))
+        self.maker_ttl_sec = config.maker_ttl_sec
+        self.order_interval_sec = config.order_interval_sec
+        self.funding_profitability_interval_hours = getattr(config, "funding_profitability_interval_hours", 24)
+        self.exit_funding_diff_pct_threshold = getattr(config, "exit_funding_diff_pct_threshold", None)
+        self.exit_hold_below_sec = getattr(config, "exit_hold_below_sec", None)
+        self.hedge_min_notional_usd = getattr(config, "hedge_min_notional_usd", Decimal("0"))
+        self.liquidation_limit_close_pct = getattr(config, "liquidation_limit_close_pct", Decimal("5"))
+        self.liquidation_market_close_pct = getattr(config, "liquidation_market_close_pct", Decimal("1"))
+        self.fill_timeout_sec = float(getattr(config, "fill_timeout_sec", 0))
+
+        self._closing_wait_started_ts: Optional[float] = None
+
         super().__init__(strategy=strategy, connectors=[self.maker_connector, self.hedge_connector], config=config, update_interval=update_interval)
 
         base_coin = (self.maker_pair.split("-")[0] if isinstance(self.maker_pair, str) and "-" in self.maker_pair else str(self.maker_pair))
@@ -253,15 +274,15 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             return
         base, quote = self.maker_pair.split("-")
 
-        self.logger().info(f"[Config] pair_notional_usd_cap: {self.config.pair_notional_usd_cap}, per_order_max_notional_usd: {self.config.per_order_max_notional_usd}, leverage: {self.config.leverage}")
+        self.logger().info(f"[Config] pair_notional_usd_cap: {self.pair_notional_usd_cap}, per_order_max_notional_usd: {self.per_order_max_notional_usd}, leverage: {self.leverage}")
         remaining_cap = self.get_remaining_maker_cap()
         self.logger().info(f"[Validation] Sufficient {quote} margin for next order; remaining cap ${remaining_cap:.2f}")
         if not self.is_enough_maker_cap(remaining_cap):
-            self.logger().warning(f"[Validation] Not enough remaining maker cap to place new order, remaining cap: ${remaining_cap:.2f}, need at least: ${self.config.per_order_min_notional_usd:.2f}. Completing executor.")
+            self.logger().warning(f"[Validation] Not enough remaining maker cap to place new order, remaining cap: ${remaining_cap:.2f}, need at least: ${self.per_order_min_notional_usd:.2f}. Completing executor.")
             return
 
-        next_notional_usd = min(remaining_cap, Decimal(str(self.config.per_order_max_notional_usd)))
-        leverage = self.config.leverage if getattr(self.config, "leverage", None) is not None else Decimal("1")
+        next_notional_usd = min(remaining_cap, Decimal(str(self.per_order_max_notional_usd)))
+        leverage = self.leverage if getattr(self, "leverage", None) is not None else Decimal("1")
         if leverage <= 0:
             leverage = Decimal("1")
         required_margin = Decimal(str(next_notional_usd)) / leverage
@@ -279,93 +300,114 @@ class MakerHedgeSingleExecutor(ExecutorBase):
 
     async def control_task(self):
         if self.status == RunnableStatus.RUNNING:
-            if not self._risk_helper.ensure_position_mode():
+            if not self._ensure_setup():
                 return
-
-            if not self._leverage_applied:
-                self._risk_helper.apply_leverage_once()
 
             now = self._strategy.current_timestamp
 
-            if self._opening_fully_completed and not self._closing:
-                self._liquidation_helper.monitor(now)
-                if not self.is_any_position_open():
-                    self.early_stop()
-                    return
-
-                self._funding_helper.monitor_and_maybe_trigger_exit(now)
+            if self._handle_monitoring(now):
                 return
 
             self._closing_helper.handle_close_ttl(now)
 
-            timeout = float(getattr(self.config, "fill_timeout_sec", 0))
-            if not self._closing:
-                start_ts = self._start_ts or 0.0
-                last_fill_ts = self._last_fill_ts or 0.0
-                elapsed_since_start = (now - start_ts) if start_ts else 0.0
-                elapsed_since_last_fill = (now - last_fill_ts) if last_fill_ts else None
-                maker_pos_base = self.get_full_position_base_amount(is_maker=True)
-                if maker_pos_base <= 0:
-                    if start_ts and elapsed_since_start >= timeout:
-                        self.logger().info(f"[Timeout] No fills for {elapsed_since_start:.0f}s >= {timeout:.0f}s; stopping executor.")
-                        self.early_stop()
-                        return
-                else:
-                    if last_fill_ts and elapsed_since_last_fill is not None and elapsed_since_last_fill >= timeout:
-                        try:
-                            cancelled_cnt = 0
-                            for order in list(self._maker_orders):
-                                try:
-                                    if order.order and getattr(order.order, "is_open", False) and not order.is_filled:
-                                        self.logger().info(f"[Timeout] Cancelling stale maker order {order.order_id} before funding monitoring.")
-                                        self.cancel_order(order, is_maker=True)
-                                        cancelled_cnt += 1
-                                except Exception:
-                                    continue
-                            if cancelled_cnt > 0:
-                                self.logger().info(f"[Timeout] Cancelled {cancelled_cnt} open maker order(s) before entering funding monitoring.")
-                        except Exception as e:
-                            self.logger().warning(f"[Timeout] Error cancelling open maker orders: {e}")
-                        self._opening_fully_completed = True
-                        self.logger().info(f"[Timeout] Partial fills but inactive for {elapsed_since_last_fill:.0f}s >= {timeout:.0f}s; entering funding monitoring (no new opens).")
-                        return
+            if self._check_timeouts(now):
+                return
 
             last_unfilled_order = self.get_last_active_unfilled_order(is_maker=True)
 
             if last_unfilled_order is None and self._closing_current is None:
-                if self._opening_fully_completed and (not self._closing):
-                    return
-                if self._maker_pending_ids:
-                    return
-
-                if not self._closing:
-                    remaining_cap = self.get_remaining_maker_cap()
-                    if not self.is_enough_maker_cap(remaining_cap):
-                        self.logger().warning(f"[Validation] Not enough remaining maker cap to place new order, remaining cap: ${remaining_cap:.2f}, need at least: ${self.config.per_order_min_notional_usd:.2f}. Completing executor.")
-                        self._opening_fully_completed = True
-                        return
-                    await self.validate_sufficient_balance()
-
-                if now < self._next_order_ready_ts:
-                    return
-
-                await self._place_next_part()
-            if last_unfilled_order and not self._opening_fully_completed:
-                if not self._closing and self.config.maker_ttl_sec and self.config.maker_ttl_sec > 0:
-                    unfilled_maker_creation_time = getattr(last_unfilled_order, "creation_timestamp", 0) or 0
-                    if unfilled_maker_creation_time > 0 and (now - unfilled_maker_creation_time) >= float(self.config.maker_ttl_sec):
-                        is_open = False
-                        try:
-                            is_open = bool(getattr(last_unfilled_order.order, "is_open", False))
-                        except Exception:
-                            is_open = False
-                        if is_open and last_unfilled_order.order_id not in self._maker_cancel_pending:
-                            self.logger().info(f"[TTL] Cancelling stale maker order {last_unfilled_order.order_id} due to TTL exceeded.")
-                            self._maker_cancel_pending.add(last_unfilled_order.order_id)
-                            self.cancel_order(last_unfilled_order, is_maker=True)
+                await self._process_new_orders(now)
+            elif last_unfilled_order and not self._opening_fully_completed:
+                self._process_maker_ttl(now, last_unfilled_order)
 
         elif self.status == RunnableStatus.SHUTTING_DOWN:
             pass
+
+    def _ensure_setup(self) -> bool:
+        if not self._risk_helper.ensure_position_mode():
+            return False
+
+        if not self._leverage_applied:
+            self._risk_helper.apply_leverage_once()
+        return True
+
+    def _handle_monitoring(self, now: float) -> bool:
+        if self._opening_fully_completed and not self._closing:
+            self._liquidation_helper.monitor(now)
+            if not self.is_any_position_open():
+                self.early_stop()
+                return True
+
+            self._funding_helper.monitor_and_maybe_trigger_exit(now)
+            return True
+        return False
+
+    def _check_timeouts(self, now: float) -> bool:
+        timeout = self.fill_timeout_sec
+        if not self._closing:
+            start_ts = self._start_ts or 0.0
+            last_fill_ts = self._last_fill_ts or 0.0
+            elapsed_since_start = (now - start_ts) if start_ts else 0.0
+            elapsed_since_last_fill = (now - last_fill_ts) if last_fill_ts else None
+            maker_pos_base = self.get_full_position_base_amount(is_maker=True)
+            if maker_pos_base <= 0:
+                if start_ts and elapsed_since_start >= timeout:
+                    self.logger().info(f"[Timeout] No fills for {elapsed_since_start:.0f}s >= {timeout:.0f}s; stopping executor.")
+                    self.early_stop()
+                    return True
+            else:
+                if last_fill_ts and elapsed_since_last_fill is not None and elapsed_since_last_fill >= timeout:
+                    try:
+                        cancelled_cnt = 0
+                        for order in list(self._maker_orders):
+                            try:
+                                if order.order and getattr(order.order, "is_open", False) and not order.is_filled:
+                                    self.logger().info(f"[Timeout] Cancelling stale maker order {order.order_id} before funding monitoring.")
+                                    self.cancel_order(order, is_maker=True)
+                                    cancelled_cnt += 1
+                            except Exception:
+                                continue
+                        if cancelled_cnt > 0:
+                            self.logger().info(f"[Timeout] Cancelled {cancelled_cnt} open maker order(s) before entering funding monitoring.")
+                    except Exception as e:
+                        self.logger().warning(f"[Timeout] Error cancelling open maker orders: {e}")
+                    self._opening_fully_completed = True
+                    self.logger().info(f"[Timeout] Partial fills but inactive for {elapsed_since_last_fill:.0f}s >= {timeout:.0f}s; entering funding monitoring (no new opens).")
+                    return True
+        return False
+
+    async def _process_new_orders(self, now: float):
+        if self._opening_fully_completed and (not self._closing):
+            return
+        if self._maker_pending_ids:
+            return
+
+        if not self._closing:
+            remaining_cap = self.get_remaining_maker_cap()
+            if not self.is_enough_maker_cap(remaining_cap):
+                self.logger().warning(f"[Validation] Not enough remaining maker cap to place new order, remaining cap: ${remaining_cap:.2f}, need at least: ${self.per_order_min_notional_usd:.2f}. Completing executor.")
+                self._opening_fully_completed = True
+                return
+            await self.validate_sufficient_balance()
+
+        if now < self._next_order_ready_ts:
+            return
+
+        await self._place_next_part()
+
+    def _process_maker_ttl(self, now: float, last_unfilled_order: TrackedOrder):
+        if not self._closing and self.maker_ttl_sec and self.maker_ttl_sec > 0:
+            unfilled_maker_creation_time = getattr(last_unfilled_order, "creation_timestamp", 0) or 0
+            if unfilled_maker_creation_time > 0 and (now - unfilled_maker_creation_time) >= float(self.maker_ttl_sec):
+                is_open = False
+                try:
+                    is_open = bool(getattr(last_unfilled_order.order, "is_open", False))
+                except Exception:
+                    is_open = False
+                if is_open and last_unfilled_order.order_id not in self._maker_cancel_pending:
+                    self.logger().info(f"[TTL] Cancelling stale maker order {last_unfilled_order.order_id} due to TTL exceeded.")
+                    self._maker_cancel_pending.add(last_unfilled_order.order_id)
+                    self.cancel_order(last_unfilled_order, is_maker=True)
 
     def _get_mid(self) -> Decimal:
         px = self.get_price(self.maker_connector, self.maker_pair, PriceType.MidPrice)
@@ -481,7 +523,7 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             rates = self._funding_helper.get_normalized_funding_rates() or {}
             entry_rate_sec = rates.get("entry")
             hedge_rate_sec = rates.get("hedge")
-            hours = getattr(self.config, "funding_profitability_interval_hours", None)
+            hours = self.funding_profitability_interval_hours
             abs_diff_pct = self._funding_helper._get_funding_diff_pct(funding_interval_hours=hours)
             oriented_diff_pct = self._funding_helper.get_oriented_funding_diff_pct(funding_interval_hours=hours)
         except Exception:
