@@ -169,16 +169,34 @@ class FundingRateArbController(ControllerBase):
                     rate_a_sec = metrics.get("rate_a_sec")
                     rate_b_sec = metrics.get("rate_b_sec")
                     funding_rate_diff_pct = metrics.get("funding_rate_diff_pct")
-                    funding_interval_hours = getattr(self.config.signal, "funding_profitability_interval_hours", self.DEFAULT_FUNDING_PROFITABILITY_INTERVAL_HOURS)
-                    rate_a_pct_for_funding_interval_hours = rate_a_sec * 3600 * 100 * funding_interval_hours if rate_a_sec is not None else None
-                    rate_b_pct_for_funding_interval_hours = rate_b_sec * 3600 * 100 * funding_interval_hours if rate_b_sec is not None else None
+                    funding_interval_hours = getattr(
+                        self.config.signal,
+                        "funding_profitability_interval_hours",
+                        self.DEFAULT_FUNDING_PROFITABILITY_INTERVAL_HOURS,
+                    )
+                    rate_a_pct_for_funding_interval_hours = (
+                        rate_a_sec * 3600 * 100 * funding_interval_hours
+                        if rate_a_sec is not None
+                        else None
+                    )
+                    rate_b_pct_for_funding_interval_hours = (
+                        rate_b_sec * 3600 * 100 * funding_interval_hours
+                        if rate_b_sec is not None
+                        else None
+                    )
                     if rate_a_sec is not None and rate_b_sec is not None:
                         rate_a_pct_for_funding_interval_hours_str = f"{rate_a_pct_for_funding_interval_hours:.6f}"
                         rate_b_pct_for_funding_interval_hours_str = f"{rate_b_pct_for_funding_interval_hours:.6f}"
                         funding_diff_str = "n/a" if funding_rate_diff_pct is None else f"{funding_rate_diff_pct:.6f}"
                         orientation_side = metrics.get("orientation_side")
                         self.logger().info(
-                            f"[Funding] base={pair_config.base} side_a={connector_a} rate_int={rate_a_pct_for_funding_interval_hours_str} side_b={connector_b} rate_int={rate_b_pct_for_funding_interval_hours_str} diff={funding_diff_str} side={getattr(orientation_side, 'name', '-')}"
+                            f"[Funding] base={pair_config.base} "
+                            f"side_a={connector_a} "
+                            f"rate_int={rate_a_pct_for_funding_interval_hours_str} "
+                            f"side_b={connector_b} "
+                            f"rate_int={rate_b_pct_for_funding_interval_hours_str} "
+                            f"diff={funding_diff_str} "
+                            f"side={getattr(orientation_side, 'name', '-')}"
                         )
 
         self.processed_data["pair_metrics"] = pair_metrics
@@ -254,7 +272,9 @@ class FundingRateArbController(ControllerBase):
 
                 if funding_rate_diff_pct < self.config.signal.min_funding_rate_profitability_pct:
                     self.logger().info(
-                        f"[Skip] below threshold {trading_pair_a} {connector_a}->{connector_b} diff={funding_rate_diff_pct:.6f} threshold={self.config.signal.min_funding_rate_profitability_pct:.6f}"
+                        f"[Skip] below threshold {trading_pair_a} {connector_a}->{connector_b} "
+                        f"diff={funding_rate_diff_pct:.6f} "
+                        f"threshold={self.config.signal.min_funding_rate_profitability_pct:.6f}"
                     )
                     continue
 
@@ -265,8 +285,18 @@ class FundingRateArbController(ControllerBase):
                         and not e.is_done
                         and getattr(e, "config", None) is not None
                         and (
-                            getattr(getattr(e.config, "maker_market", None), "connector_name", None) in {connector_a, connector_b}
-                            or getattr(getattr(e.config, "hedge_market", None), "connector_name", None) in {connector_a, connector_b}
+                            getattr(
+                                getattr(e.config, "maker_market", None),
+                                "connector_name",
+                                None,
+                            )
+                            in {connector_a, connector_b}
+                            or getattr(
+                                getattr(e.config, "hedge_market", None),
+                                "connector_name",
+                                None,
+                            )
+                            in {connector_a, connector_b}
                         )
                     )
                 )
@@ -286,12 +316,22 @@ class FundingRateArbController(ControllerBase):
                     continue
 
                 self.logger().info(f"[Check] cooldown passed {trading_pair_a} {connector_a}->{connector_b}")
-                pair_cap_usd: Decimal = pair_config.total_notional_usd_per_pair if pair_config.total_notional_usd_per_pair > 0 else self.config.execution.total_notional_usd
+                pair_cap_usd: Decimal = (
+                    pair_config.total_notional_usd_per_pair
+                    if pair_config.total_notional_usd_per_pair > 0
+                    else self.config.execution.total_notional_usd
+                )
                 if active_alloc_usd + pair_cap_usd > self.config.execution.total_notional_usd:
                     self.logger().info(f"[Skip] allocation exceed {trading_pair_a} {connector_a}->{connector_b}")
                     continue
 
-                maker_connector, maker_trading_pair, hedge_connector, hedge_trading_pair, maker_side = self._select_maker_hedge_for_pair(
+                (
+                    maker_connector,
+                    maker_trading_pair,
+                    hedge_connector,
+                    hedge_trading_pair,
+                    maker_side,
+                ) = self._select_maker_hedge_for_pair(
                     base=pair_config.base,
                     connector_a=connector_a,
                     trading_pair_a=trading_pair_a,
@@ -325,9 +365,17 @@ class FundingRateArbController(ControllerBase):
                     liquidation_market_close_pct=self.config.exit.liquidation_market_close_pct,
                 )
 
-                actions.append(CreateExecutorAction(executor_config=exec_cfg, controller_id=self.config.id))
+                actions.append(
+                    CreateExecutorAction(
+                        executor_config=exec_cfg,
+                        controller_id=self.config.id,
+                    )
+                )
                 self.logger().info(
-                    f"[Enter] {maker_trading_pair} {maker_connector}->{hedge_connector} side={maker_side.name} diff={(f'{funding_rate_diff_pct:.6f}' if funding_rate_diff_pct is not None else 'n/a')} cap_usd={pair_cap_usd:.2f}"
+                    f"[Enter] {maker_trading_pair} {maker_connector}->{hedge_connector} "
+                    f"side={maker_side.name} "
+                    f"diff={(f'{funding_rate_diff_pct:.6f}' if funding_rate_diff_pct is not None else 'n/a')} "
+                    f"cap_usd={pair_cap_usd:.2f}"
                 )
 
                 self._last_entry_ts_by_pair[cooldown_key] = now_ts
@@ -387,7 +435,10 @@ class FundingRateArbController(ControllerBase):
         metrics["rate_a_sec"] = rate_a_sec
         metrics["rate_b_sec"] = rate_b_sec
 
-        interval_hours = self.config.signal.funding_profitability_interval_hours or self.DEFAULT_FUNDING_PROFITABILITY_INTERVAL_HOURS
+        interval_hours = (
+            self.config.signal.funding_profitability_interval_hours
+            or self.DEFAULT_FUNDING_PROFITABILITY_INTERVAL_HOURS
+        )
         diff_pct_signed = util_funding_diff_pct(rate_a_sec, rate_b_sec, hours=int(interval_hours))
         funding_rate_diff_pct = abs(Decimal(str(diff_pct_signed))) if diff_pct_signed is not None else None
 
@@ -487,12 +538,24 @@ class FundingRateArbController(ControllerBase):
             info_rows.append({
                 "Entry": f"{entry_ex}:{entry_tp}",
                 "Hedge": f"{hedge_ex}:{hedge_tp}",
-                "Min entry fund": _to_int(min_to_funding_entry) if min_to_funding_entry is not None else "-",
-                "Min hedge fund": _to_int(min_to_funding_hedge) if min_to_funding_hedge is not None else "-",
-                "Diff to liq maker %": _decimal_to_str(last_diff_pct_to_liquidation_maker) if last_diff_pct_to_liquidation_maker is not None else "-",
-                "Diff to liq hedge %": _decimal_to_str(last_diff_pct_to_liquidation_hedge) if last_diff_pct_to_liquidation_hedge is not None else "-",
-                "Liq price maker": _decimal_to_str(last_liquidation_price_maker) if last_liquidation_price_maker is not None else "-",
-                "Liq price hedge": _decimal_to_str(last_liquidation_price_hedge) if last_liquidation_price_hedge is not None else "-",
+                "Min entry fund": _to_int(min_to_funding_entry)
+                if min_to_funding_entry is not None
+                else "-",
+                "Min hedge fund": _to_int(min_to_funding_hedge)
+                if min_to_funding_hedge is not None
+                else "-",
+                "Diff to liq maker %": _decimal_to_str(last_diff_pct_to_liquidation_maker)
+                if last_diff_pct_to_liquidation_maker is not None
+                else "-",
+                "Diff to liq hedge %": _decimal_to_str(last_diff_pct_to_liquidation_hedge)
+                if last_diff_pct_to_liquidation_hedge is not None
+                else "-",
+                "Liq price maker": _decimal_to_str(last_liquidation_price_maker)
+                if last_liquidation_price_maker is not None
+                else "-",
+                "Liq price hedge": _decimal_to_str(last_liquidation_price_hedge)
+                if last_liquidation_price_hedge is not None
+                else "-",
             })
 
             maker_orders = info.get("maker_open_orders", []) or []
@@ -522,13 +585,22 @@ class FundingRateArbController(ControllerBase):
             return ["No active executors."]
 
         exec_df = pd.DataFrame(exec_rows)
-        outputs.append("Active executors:\n" + format_df_for_printout(exec_df, table_format="psql", index=False))
+        outputs.append(
+            "Active executors:\n"
+            + format_df_for_printout(exec_df, table_format="psql", index=False)
+        )
 
         info_df = pd.DataFrame(info_rows)
-        outputs.append("Executor info summary:\n" + format_df_for_printout(info_df, table_format="psql", index=False))
+        outputs.append(
+            "Executor info summary:\n"
+            + format_df_for_printout(info_df, table_format="psql", index=False)
+        )
 
         if order_rows:
             orders_df = pd.DataFrame(order_rows)
-            outputs.append("Open orders:\n" + format_df_for_printout(orders_df, table_format="psql", index=False))
+            outputs.append(
+                "Open orders:\n"
+                + format_df_for_printout(orders_df, table_format="psql", index=False)
+            )
 
         return outputs
