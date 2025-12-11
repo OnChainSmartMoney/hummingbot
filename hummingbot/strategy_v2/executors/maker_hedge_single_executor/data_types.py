@@ -15,7 +15,6 @@ class MakerHedgeSingleExecutorConfig(ExecutorConfigBase):
     pair_notional_usd_cap: Decimal
     per_order_max_notional_usd: Decimal
     per_order_min_notional_usd: Decimal = Decimal("0")
-    order_interval_sec: int = 8
 
     maker_price_offset_pct: Decimal = Decimal("0.5")
     maker_ttl_sec: int = 20

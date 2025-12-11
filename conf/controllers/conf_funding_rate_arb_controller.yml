@@ -1,34 +1,38 @@
 # Quickstart ./bin/hummingbot_quickstart.py -p q -f v2_with_controllers.py -c conf_v2_with_controllers_funding_arb.yml
+
 controller_type: generic
 controller_name: funding_rate_arb_controller
+id: conf_funding_rate_arb_controller
 
-connectors:
-  - hyperliquid_perpetual
-  - bybit_perpetual
+legs:
+  - role: maker
+    connector: hyperliquid_perpetual
+    quote_asset: USD
+    side: BUY
+  - role: hedge
+    connector: bybit_perpetual
+    quote_asset: USDT
+    side: SELL
 
-pairs:
-  - base: ETH
-    total_notional_usd_per_pair: 200
-    max_notional_per_part: 100
-    min_notional_per_part: 20
-    per_exchange_quote:
-      hyperliquid_perpetual: USD
-      bybit_perpetual: USDT
+pair:
+  base_asset: ETH
+  total_notional_usd: 200
+  max_notional_per_part: 100
+  min_notional_per_part: 20
 
 signal:
   min_funding_rate_profitability_pct: 0.00
   funding_profitability_interval_hours: 24
 
 execution:
-  total_notional_usd: 800
   leverage: 10
-  part_interval_sec: 8
   non_profitable_wait_sec: 1200
   fill_timeout_sec: 300
+
   maker:
     price_offset_pct: 0.02
     ttl_sec: 15
-    refresh_on_stale: true
+
   hedge:
     min_hedge_notional_usd: 5
 
