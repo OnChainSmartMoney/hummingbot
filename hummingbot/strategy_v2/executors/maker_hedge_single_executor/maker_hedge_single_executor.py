@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
 import time
 from decimal import Decimal, getcontext
@@ -17,8 +17,9 @@ from hummingbot.core.event.events import (
     SellOrderCompletedEvent,
     SellOrderCreatedEvent,
 )
+from hummingbot.core.utils.async_utils import safe_ensure_future
 from hummingbot.logger import HummingbotLogger
-from hummingbot.remote_iface.mqtt import ETopicPublisher, MQTTGateway
+from hummingbot.remote_iface.mqtt import ETopicPublisher
 from hummingbot.strategy_v2.executors.executor_base import ExecutorBase
 from hummingbot.strategy_v2.executors.maker_hedge_single_executor.data_types import MakerHedgeSingleExecutorConfig
 from hummingbot.strategy_v2.models.base import RunnableStatus
@@ -97,6 +98,8 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         self._close_queue: List[Dict] = []
         self._closing_current: Optional[Dict] = None
         self._closing_no_wait: bool = False
+
+        self._closing_completed_event_published: bool = False
 
         self._waiting_hedge_ack: bool = False
         self._last_hedge_order_id: Optional[str] = None
@@ -694,7 +697,7 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         except Exception:
             hedge_open_orders = []
 
-        return {
+        custom_info: Dict[str, Any] = {
             "maker_connector": self.maker_connector,
             "maker_pair": self.maker_pair,
             "hedge_connector": self.hedge_connector,
@@ -735,7 +738,12 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             "last_liquidation_price_hedge": self._last_liquidation_price_hedge,
         }
 
+        safe_ensure_future(self._publish_custom_info_event(custom_info))
+
+        return custom_info
+
     def close_all_positions_by_market(self):
+        self._closing = True
         maker_exposure = self._maker_remaining_exposure_base()
         hedge_exposure = self._hedge_remaining_exposure_base()
         self.logger().info(
@@ -776,6 +784,7 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             self.stop()
             return
 
+        self._closing = True
         self.close_all_positions_by_market()
         self.close_type = CloseType.EARLY_STOP
         self.logger().info(
@@ -812,17 +821,61 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             "event": "opening_completed",
             "reason": reason,
             "timestamp": timestamp,
-            "executor_id": self.config.id,
-            "controller_id": getattr(self.config, "controller_id", None),
-            "maker_connector": self.maker_connector,
-            "maker_pair": self.maker_pair,
-            "hedge_connector": self.hedge_connector,
-            "hedge_pair": self.hedge_pair,
-            "side": self.side_maker.name,
         }
 
         self._publish_executor_topic(payload)
-        self._publish_executor_status_update(payload)
+
+    async def _publish_closing_completed_event(self, reason: str):
+        timestamp = float(
+            getattr(self._strategy, "current_timestamp", time.time()) or time.time()
+        )
+        payload = {
+            "event": "closing_completed",
+            "reason": reason,
+            "timestamp": timestamp,
+        }
+
+        self._publish_executor_topic(payload)
+        await asyncio.sleep(0.1)
+
+    async def _publish_custom_info_event(self, info: Dict[str, Any]):
+        timestamp = float(
+            getattr(self._strategy, "current_timestamp", time.time()) or time.time()
+        )
+        payload = {
+            "event": "custom_info",
+            "info": info,
+            "timestamp": timestamp,
+        }
+
+        self._publish_executor_topic(payload)
+        await asyncio.sleep(0.1)
+
+    def on_stop(self):
+        if self._closing_completed_event_published:
+            return
+
+        if self.close_type is None:
+            return
+
+        reason = (
+            self.close_type.name
+            if hasattr(self.close_type, "name")
+            else str(self.close_type)
+        )
+
+        try:
+            safe_ensure_future(self._publish_closing_completed_event(reason))
+        except Exception as e:
+            try:
+                self.logger().debug(
+                    f"[Close] Failed to schedule closing completion publish: {e}"
+                )
+            except Exception:
+                pass
+        finally:
+            self._closing_completed_event_published = True
+            super().on_stop()
 
     def _publish_executor_topic(self, payload: Dict[str, Any]):
         if self._executor_events_pub is None:
@@ -843,23 +896,3 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             self._executor_events_pub.send(payload)
         except Exception as e:
             self.logger().debug(f"[MQTT] Failed to publish executor event: {e}")
-
-    def _publish_executor_status_update(self, payload: Dict[str, Any]):
-        gateway = None
-        try:
-            gateway = MQTTGateway.main()
-        except Exception:
-            gateway = None
-
-        if gateway is None:
-            return
-
-        try:
-            gateway.broadcast_status_update(
-                msg=json.dumps(payload),
-                msg_type="executor_event",
-            )
-        except Exception as e:
-            self.logger().debug(
-                f"[MQTT] Failed to broadcast executor status update: {e}"
-            )
