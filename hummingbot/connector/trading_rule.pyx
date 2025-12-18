@@ -22,7 +22,9 @@ cdef class TradingRule:
                  supports_limit_orders: bool = True,
                  supports_market_orders: bool = True,
                  buy_order_collateral_token: Optional[str] = None,
-                 sell_order_collateral_token: Optional[str] = None):
+                 sell_order_collateral_token: Optional[str] = None,
+                 max_leverage: Optional[Decimal] = None,
+                 min_leverage: Optional[Decimal] = None):
         self.trading_pair = trading_pair
         self.min_order_size = min_order_size
         self.max_order_size = max_order_size
@@ -37,6 +39,8 @@ cdef class TradingRule:
         quote_token = split_hb_trading_pair(self.trading_pair)[1]
         self.buy_order_collateral_token = buy_order_collateral_token or quote_token
         self.sell_order_collateral_token = sell_order_collateral_token or quote_token
+        self.max_leverage = max_leverage
+        self.min_leverage = min_leverage
 
     def __repr__(self) -> str:
         return f"TradingRule(trading_pair='{self.trading_pair}', " \
@@ -52,4 +56,5 @@ cdef class TradingRule:
                f"supports_market_orders={self.supports_market_orders}, " \
                f"buy_order_collateral_token={self.buy_order_collateral_token}, " \
                f"sell_order_collateral_token={self.sell_order_collateral_token}," \
-               f")"
+               f"max_leverage={self.max_leverage}, " \
+               f"min_leverage={self.min_leverage})"
