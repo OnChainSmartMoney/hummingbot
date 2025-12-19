@@ -22,7 +22,7 @@ cdef class TradingRule:
                  supports_limit_orders: bool = True,
                  supports_market_orders: bool = True,
                  buy_order_collateral_token: Optional[str] = None,
-                 sell_order_collateral_token: Optional[str] = None,
+                 sell_order_collateral_token: Optional[str] = None):
         self.trading_pair = trading_pair
         self.min_order_size = min_order_size
         self.max_order_size = max_order_size
