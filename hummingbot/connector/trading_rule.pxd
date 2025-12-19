@@ -13,5 +13,3 @@ cdef class TradingRule:
         public bint supports_market_orders             # if market order is allowed for this trading pair
         public object buy_order_collateral_token       # Indicates the collateral token used for buy orders
         public object sell_order_collateral_token      # Indicates the collateral token used for sell orders
-        public object max_leverage                     # Max leverage
-        public object min_leverage                     # Min leverage

@@ -919,21 +919,6 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
                         if is_linear
                         else s_decimal_0
                     )
-
-                    min_leverage = int(
-                        Decimal(instrument["leverageFilter"]["minLeverage"])
-                    )
-                    max_leverage = int(
-                        Decimal(instrument["leverageFilter"]["maxLeverage"])
-                    )
-
-                    if not hasattr(self, "_leverage_bounds_by_trading_pair"):
-                        self._leverage_bounds_by_trading_pair = {}
-                    self._leverage_bounds_by_trading_pair[trading_pair] = (
-                        min_leverage,
-                        max_leverage,
-                    )
-
                     trading_rules[trading_pair] = TradingRule(
                         trading_pair=trading_pair,
                         min_order_size=Decimal(
@@ -952,16 +937,6 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
                         buy_order_collateral_token=collateral_token,
                         sell_order_collateral_token=collateral_token,
                     )
-
-                    try:
-                        setattr(
-                            trading_rules[trading_pair], "max_leverage", max_leverage
-                        )
-                        setattr(
-                            trading_rules[trading_pair], "min_leverage", min_leverage
-                        )
-                    except Exception:
-                        pass
             except Exception:
                 self.logger().exception(
                     f"Error parsing the trading pair rule: {instrument}. Skipping..."
@@ -1081,8 +1056,6 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
             is_auth_required=True,
             trading_pair=trading_pair,
         )
-
-        self.logger().info(f"Set leverage response: {resp}")
 
         success = False
         msg = ""

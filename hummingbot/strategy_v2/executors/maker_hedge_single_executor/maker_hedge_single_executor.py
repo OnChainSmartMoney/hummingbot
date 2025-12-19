@@ -405,7 +405,7 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             return False
 
         if not self._leverage_applied:
-            return self._risk_helper.apply_leverage()
+            self._risk_helper.apply_leverage_once()
         return True
 
     def _handle_monitoring(self, now: float) -> bool:
@@ -845,19 +845,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         payload = {
             "event": "custom_info",
             "info": info,
-            "timestamp": timestamp,
-        }
-
-        self._publish_executor_topic(payload)
-        await asyncio.sleep(0.1)
-
-    async def _publish_cant_apply_leverage_event(self, reason: str):
-        timestamp = float(
-            getattr(self._strategy, "current_timestamp", time.time()) or time.time()
-        )
-        payload = {
-            "event": "cant_apply_leverage",
-            "reason": reason,
             "timestamp": timestamp,
         }
 

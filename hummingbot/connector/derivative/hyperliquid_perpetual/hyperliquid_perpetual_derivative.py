@@ -745,30 +745,17 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
                 _min_order_size = Decimal(
                     str(10 ** -len(price_info.get("openInterest").split(".")[1]))
                 )
-                max_leverage = int(Decimal(str(coin_info.get("maxLeverage"))))
-                min_leverage = 1
-
-                if not hasattr(self, "_leverage_bounds_by_trading_pair"):
-                    self._leverage_bounds_by_trading_pair = {}
-                self._leverage_bounds_by_trading_pair[trading_pair] = (
-                    min_leverage,
-                    max_leverage,
-                )
                 collateral_token = CONSTANTS.CURRENCY
-                rule = TradingRule(
-                    trading_pair,
-                    min_base_amount_increment=step_size,
-                    min_price_increment=price_size,
-                    min_order_size=_min_order_size,
-                    buy_order_collateral_token=collateral_token,
-                    sell_order_collateral_token=collateral_token,
+                return_val.append(
+                    TradingRule(
+                        trading_pair,
+                        min_base_amount_increment=step_size,
+                        min_price_increment=price_size,
+                        min_order_size=_min_order_size,
+                        buy_order_collateral_token=collateral_token,
+                        sell_order_collateral_token=collateral_token,
+                    )
                 )
-                try:
-                    setattr(rule, "max_leverage", max_leverage)
-                    setattr(rule, "min_leverage", min_leverage)
-                except Exception:
-                    pass
-                return_val.append(rule)
             except Exception:
                 self.logger().error(
                     f"Error parsing the trading pair rule {exchange_info_dict}. Skipping.",
