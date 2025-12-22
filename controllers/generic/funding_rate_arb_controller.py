@@ -83,7 +83,6 @@ class PairConfig(BaseModel):
 
 
 class SignalConfig(BaseModel):
-    min_funding_rate_profitability_pct: Decimal
     funding_profitability_interval_hours: int
 
 

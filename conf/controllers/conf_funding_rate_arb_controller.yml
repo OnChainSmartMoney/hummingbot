@@ -16,21 +16,20 @@ legs:
 
 pair:
   base_asset: ETH
-  total_notional_usd: 200
+  total_notional_usd: 400
   max_notional_per_part: 100
   min_notional_per_part: 20
 
 signal:
-  min_funding_rate_profitability_pct: 0.00
   funding_profitability_interval_hours: 24
 
 execution:
-  leverage: 10
+  leverage: 1000
   non_profitable_wait_sec: 1200
   fill_timeout_sec: 300
 
   maker:
-    price_offset_pct: 0.02
+    price_offset_pct: -0
     ttl_sec: 15
 
   hedge:
