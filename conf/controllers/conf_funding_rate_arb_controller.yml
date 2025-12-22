@@ -20,9 +20,6 @@ pair:
   max_notional_per_part: 100
   min_notional_per_part: 20
 
-signal:
-  funding_profitability_interval_hours: 24
-
 execution:
   leverage: 1000
   non_profitable_wait_sec: 1200
@@ -36,6 +33,7 @@ execution:
     min_hedge_notional_usd: 5
 
 exit:
+  funding_profitability_interval_hours: 24
   fr_spread_below_pct: 0.00
   hold_below_sec: 60
   closing_non_profitable_wait_sec: 3600

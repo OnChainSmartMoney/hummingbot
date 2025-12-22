@@ -82,10 +82,6 @@ class PairConfig(BaseModel):
         return base
 
 
-class SignalConfig(BaseModel):
-    funding_profitability_interval_hours: int
-
-
 class MakerConfig(BaseModel):
     price_offset_pct: Decimal
     ttl_sec: int
@@ -104,12 +100,12 @@ class ExecutionConfig(BaseModel):
 
 
 class ExitConfig(BaseModel):
+    funding_profitability_interval_hours: int
     fr_spread_below_pct: Optional[Decimal]
     hold_below_sec: int
-    closing_non_profitable_wait_sec: int = 3600
-    liquidation_limit_close_pct: Decimal = Decimal("10")
-    liquidation_market_close_pct: Decimal = Decimal("2")
-    stop_cooldown_sec: int = 300
+    closing_non_profitable_wait_sec: int
+    liquidation_limit_close_pct: Decimal
+    liquidation_market_close_pct: Decimal
 
 
 class FundingRateArbControllerConfig(ControllerConfigBase):
@@ -118,7 +114,6 @@ class FundingRateArbControllerConfig(ControllerConfigBase):
     connectors: List[str] = Field(default_factory=list)
     legs: List[LegConfig] = Field(default_factory=list)
     pair: PairConfig
-    signal: SignalConfig
     execution: ExecutionConfig
     exit: ExitConfig
 
@@ -255,7 +250,7 @@ class FundingRateArbController(ControllerBase):
             hedge_min_notional_usd=self.config.execution.hedge.min_hedge_notional_usd,
             exit_funding_diff_pct_threshold=self.config.exit.fr_spread_below_pct,
             exit_hold_below_sec=self.config.exit.hold_below_sec,
-            funding_profitability_interval_hours=self.config.signal.funding_profitability_interval_hours,
+            funding_profitability_interval_hours=self.config.exit.funding_profitability_interval_hours,
             non_profitable_wait_sec=self.config.execution.non_profitable_wait_sec,
             fill_timeout_sec=self.config.execution.fill_timeout_sec,
             closing_non_profitable_wait_sec=self.config.exit.closing_non_profitable_wait_sec,
