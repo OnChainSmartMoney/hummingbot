@@ -6,22 +6,22 @@ id: conf_funding_rate_arb_controller
 
 legs:
   - role: maker
-    connector: hyperliquid_perpetual
-    quote_asset: USD
-    side: BUY
-  - role: hedge
     connector: bybit_perpetual
     quote_asset: USDT
+    side: BUY
+  - role: hedge
+    connector: hyperliquid_perpetual
+    quote_asset: USD
     side: SELL
 
 pair:
   base_asset: ETH
-  total_notional_usd: 400
-  max_notional_per_part: 100
+  total_notional_usd: 100
+  max_notional_per_part: 50
   min_notional_per_part: 20
 
 execution:
-  leverage: 1000
+  leverage: 10
   non_profitable_wait_sec: 1200
   fill_timeout_sec: 300
 

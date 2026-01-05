@@ -1,5 +1,5 @@
 import asyncio
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from bidict import bidict
@@ -36,6 +36,18 @@ s_decimal_0 = Decimal(0)
 
 class BybitPerpetualDerivative(PerpetualDerivativePyBase):
     web_utils = web_utils
+
+    @staticmethod
+    def _safe_decimal(value: Any, default: Decimal = s_decimal_NaN) -> Decimal:
+        if value is None:
+            return default
+        text = str(value).strip()
+        if text == "" or text.lower() in {"none", "null"} or text in {"--"}:
+            return default
+        try:
+            return Decimal(text)
+        except (InvalidOperation, ValueError, TypeError):
+            return default
 
     def __init__(
         self,
@@ -601,7 +613,7 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
                 unrealized_pnl = Decimal(str(data["unrealisedPnl"]))
                 entry_price = Decimal(str(data["avgPrice"]))
                 leverage = Decimal(str(data["leverage"]))
-                liquidation_price = Decimal(str(data["liqPrice"]))
+                liquidation_price = self._safe_decimal(data.get("liqPrice"))
                 position = Position(
                     trading_pair=hb_trading_pair,
                     position_side=position_side,
@@ -781,7 +793,7 @@ class BybitPerpetualDerivative(PerpetualDerivativePyBase):
         amount = Decimal(str(position_msg["size"]))
         leverage = Decimal(str(position_msg["leverage"]))
         unrealized_pnl = Decimal(str(position_msg["unrealisedPnl"]))
-        liquidation_price = Decimal(str(position_msg["liqPrice"]))
+        liquidation_price = self._safe_decimal(position_msg.get("liqPrice"))
         pos_key = self._perpetual_trading.position_key(trading_pair, position_side)
         if amount != s_decimal_0:
             position = Position(

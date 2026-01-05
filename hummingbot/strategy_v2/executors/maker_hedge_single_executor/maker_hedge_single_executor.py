@@ -839,6 +839,9 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         await asyncio.sleep(0.1)
 
     async def _publish_custom_info_event(self, info: Dict[str, Any]):
+        if self._closing_completed_event_published:
+            return
+
         timestamp = float(
             getattr(self._strategy, "current_timestamp", time.time()) or time.time()
         )
