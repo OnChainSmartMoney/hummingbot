@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import time
 from decimal import Decimal
-from typing import Any, AsyncIterable, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterable, Dict, List, Literal, Optional, Tuple
 
 from bidict import bidict
 
@@ -45,16 +45,18 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
         self,
         balance_asset_limit: Optional[Dict[str, Dict[str, Decimal]]] = None,
         rate_limits_share_pct: Decimal = Decimal("100"),
-        hyperliquid_perpetual_api_secret: str = None,
+        hyperliquid_perpetual_secret_key: str = None,
+        hyperliquid_perpetual_address: str = None,
         use_vault: bool = False,
-        hyperliquid_perpetual_api_key: str = None,
+        hyperliquid_perpetual_mode: Literal["arb_wallet", "api_wallet"] = "arb_wallet",
         trading_pairs: Optional[List[str]] = None,
         trading_required: bool = True,
         domain: str = CONSTANTS.DOMAIN,
     ):
-        self.hyperliquid_perpetual_api_key = hyperliquid_perpetual_api_key
-        self.hyperliquid_perpetual_secret_key = hyperliquid_perpetual_api_secret
+        self.hyperliquid_perpetual_address = hyperliquid_perpetual_address
+        self.hyperliquid_perpetual_secret_key = hyperliquid_perpetual_secret_key
         self._use_vault = use_vault
+        self._connection_mode = hyperliquid_perpetual_mode
         self._trading_required = trading_required
         self._trading_pairs = trading_pairs
         self._domain = domain
@@ -72,7 +74,7 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
     def authenticator(self) -> Optional[HyperliquidPerpetualAuth]:
         if self._trading_required:
             return HyperliquidPerpetualAuth(
-                self.hyperliquid_perpetual_api_key,
+                self.hyperliquid_perpetual_address,
                 self.hyperliquid_perpetual_secret_key,
                 self._use_vault,
             )
@@ -464,7 +466,7 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
                     path_url=CONSTANTS.ACCOUNT_TRADE_LIST_URL,
                     data={
                         "type": CONSTANTS.TRADES_TYPE,
-                        "user": self.hyperliquid_perpetual_api_key,
+                        "user": self.hyperliquid_perpetual_address,
                     },
                 )
             except asyncio.CancelledError:
@@ -556,7 +558,7 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
             path_url=CONSTANTS.ORDER_URL,
             data={
                 "type": CONSTANTS.ORDER_STATUS_TYPE,
-                "user": self.hyperliquid_perpetual_api_key,
+                "user": self.hyperliquid_perpetual_address,
                 "oid": int(exchange_order_id) if exchange_order_id else client_order_id,
             },
         )
@@ -827,7 +829,7 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
             path_url=CONSTANTS.ACCOUNT_INFO_URL,
             data={
                 "type": CONSTANTS.USER_STATE_TYPE,
-                "user": self.hyperliquid_perpetual_api_key,
+                "user": self.hyperliquid_perpetual_address,
             },
         )
         quote = CONSTANTS.CURRENCY
@@ -841,7 +843,7 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
             path_url=CONSTANTS.POSITION_INFORMATION_URL,
             data={
                 "type": CONSTANTS.USER_STATE_TYPE,
-                "user": self.hyperliquid_perpetual_api_key,
+                "user": self.hyperliquid_perpetual_address,
             },
         )
         for position in positions["assetPositions"]:
@@ -941,7 +943,7 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
             path_url=CONSTANTS.GET_LAST_FUNDING_RATE_PATH_URL,
             data={
                 "type": "userFunding",
-                "user": self.hyperliquid_perpetual_api_key,
+                "user": self.hyperliquid_perpetual_address,
                 "startTime": self._last_funding_time(),
             },
         )
