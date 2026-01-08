@@ -185,8 +185,7 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
         """
         Applies trading rule to quantize order price.
         """
-        d_price = Decimal(round(float(f"{price:.5g}"), 6))
-        return d_price
+        return super().quantize_order_price(trading_pair, price)
 
     async def _update_trading_rules(self):
         exchange_info = await self._api_post(
@@ -338,9 +337,10 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
             reference_price = (
                 self.get_mid_price(trading_pair) if price.is_nan() else price
             )
+            slippage = Decimal(str(CONSTANTS.MARKET_ORDER_SLIPPAGE))
             price = self.quantize_order_price(
                 trading_pair,
-                reference_price * Decimal(1 + CONSTANTS.MARKET_ORDER_SLIPPAGE),
+                reference_price * (Decimal("1") + slippage),
             )
 
         safe_ensure_future(
@@ -385,9 +385,10 @@ class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
             reference_price = (
                 self.get_mid_price(trading_pair) if price.is_nan() else price
             )
+            slippage = Decimal(str(CONSTANTS.MARKET_ORDER_SLIPPAGE))
             price = self.quantize_order_price(
                 trading_pair,
-                reference_price * Decimal(1 - CONSTANTS.MARKET_ORDER_SLIPPAGE),
+                reference_price * (Decimal("1") - slippage),
             )
 
         safe_ensure_future(

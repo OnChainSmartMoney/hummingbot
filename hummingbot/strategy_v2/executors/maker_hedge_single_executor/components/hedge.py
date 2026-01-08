@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from hummingbot.core.data_type.common import OrderType, PositionAction
+from hummingbot.core.data_type.common import OrderType, PositionAction, PriceType
 from hummingbot.strategy_v2.models.executors import TrackedOrder
 
 if TYPE_CHECKING:
@@ -53,6 +53,15 @@ class HedgeHelper:
             q_amt = self.exe._hedge_accum_base
         if q_amt is None or q_amt <= 0:
             self.exe.logger().warning(f"[Hedge] Accumulated qty {self.exe._hedge_accum_base} too small to hedge after quantization.")
+            return
+
+        mid = self.exe.get_price(self.exe.hedge_connector, self.exe.hedge_pair, PriceType.MidPrice)
+        notional_usd = q_amt * mid
+        min_notional = Decimal(str(getattr(self.exe, "hedge_min_notional_usd")))
+        if min_notional > 0 and notional_usd < min_notional:
+            self.exe.logger().debug(
+                f"[Hedge] Accumulated notional ${notional_usd:.4f} below min ${min_notional}; deferring hedge."
+            )
             return
 
         self.market_hedge(q_amt)
