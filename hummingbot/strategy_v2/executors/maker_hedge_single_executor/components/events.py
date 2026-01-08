@@ -38,7 +38,7 @@ class EventsHelper:
             updated = None
             try:
                 updated = exe.get_in_flight_order(
-                    exe._market_name(market), event.order_id
+                    exe.get_connector_name(market), event.order_id
                 )
             except Exception:
                 pass
@@ -59,7 +59,7 @@ class EventsHelper:
             updated = None
             try:
                 updated = exe.get_in_flight_order(
-                    exe._market_name(market), event.order_id
+                    exe.get_connector_name(market), event.order_id
                 )
             except Exception:
                 pass
@@ -77,8 +77,8 @@ class EventsHelper:
             exe.maker_connector, exe.maker_pair, PriceType.MidPrice
         )
 
-        market_name = exe._market_name(market)
-        if market_name == exe.maker_connector:
+        connector_name = exe.get_connector_name(market)
+        if connector_name == exe.maker_connector:
             exe._last_fill_ts = float(exe._strategy.current_timestamp)
 
         if exe._closing_current and event.order_id == exe._closing_current.get(
@@ -89,25 +89,24 @@ class EventsHelper:
                 exe._closing_current.get("executed_base", Decimal("0")) + filled_base
             )
             exe._add_fee_quote(event.trade_fee, mid_maker, exe.maker_pair)
-            if exe._hedge_helper:
-                exe._hedge_helper.add_to_accumulator(filled_base)
+            exe._hedge_helper.add_to_accumulator(filled_base)
             return
 
-        mo = exe._maker_by_id.get(event.order_id)
-        if mo:
+        maker_order = exe._maker_by_id.get(event.order_id)
+        if maker_order:
             try:
-                updated = exe.get_in_flight_order(
-                    exe._market_name(market), event.order_id
-                )
+                updated = exe.get_in_flight_order(connector_name, event.order_id)
                 if updated:
-                    mo.order = updated
-                    exe.replace_order(mo, is_maker=True)
+                    maker_order.order = updated
+                    exe.replace_order(maker_order, is_maker=True)
             except Exception:
+                exe.logger().warning(
+                    f"Failed to update maker order {event.order_id} after fill."
+                )
                 pass
             filled_base = Decimal(str(event.amount))
             exe._add_fee_quote(event.trade_fee, mid_maker, exe.maker_pair)
-            if exe._hedge_helper:
-                exe._hedge_helper.add_to_accumulator(filled_base)
+            exe._hedge_helper.add_to_accumulator(filled_base)
             return
 
         if event.order_id in exe._hedge_by_id:
@@ -202,7 +201,7 @@ class EventsHelper:
             to = exe._maker_by_id.get(event.order_id)
             try:
                 updated = exe.get_in_flight_order(
-                    exe._market_name(market), event.order_id
+                    exe.get_connector_name(market), event.order_id
                 )
                 if updated:
                     to.order = updated
@@ -219,7 +218,7 @@ class EventsHelper:
             to = exe._hedge_by_id.get(event.order_id)
             try:
                 updated = exe.get_in_flight_order(
-                    exe._market_name(market), event.order_id
+                    exe.get_connector_name(market), event.order_id
                 )
                 if updated:
                     to.order = updated
@@ -318,11 +317,11 @@ class EventsHelper:
         exe = self.exe
         try:
             exe.logger().info(f"[Funding event] received: {event}")
-            market_name = exe._market_name(market)
+            connector_name = exe.get_connector_name(market)
             event_pair = getattr(event, "trading_pair", None)
-            if market_name == exe.maker_connector and event_pair == exe.maker_pair:
+            if connector_name == exe.maker_connector and event_pair == exe.maker_pair:
                 leg = "maker"
-            elif market_name == exe.hedge_connector and event_pair == exe.hedge_pair:
+            elif connector_name == exe.hedge_connector and event_pair == exe.hedge_pair:
                 leg = "hedge"
             else:
                 return
@@ -335,7 +334,7 @@ class EventsHelper:
                 exe._cum_funding_maker_quote + exe._cum_funding_hedge_quote
             )
             exe.logger().info(
-                f"[Funding] {leg} {market_name}:{event.trading_pair} amount={amount} cum_maker={exe._cum_funding_maker_quote} cum_hedge={exe._cum_funding_hedge_quote} net={exe._cum_funding_quote}"
+                f"[Funding] {leg} {connector_name}:{event.trading_pair} amount={amount} cum_maker={exe._cum_funding_maker_quote} cum_hedge={exe._cum_funding_hedge_quote} net={exe._cum_funding_quote}"
             )
         except Exception as e:
             exe.logger().warning(f"[Funding event] Error processing: {e}")

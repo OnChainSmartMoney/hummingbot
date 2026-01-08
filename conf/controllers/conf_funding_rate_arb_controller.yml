@@ -5,23 +5,23 @@ controller_name: funding_rate_arb_controller
 id: conf_funding_rate_arb_controller
 
 legs:
-  - role: maker
+  - role: hedge
     connector: bybit_perpetual
     quote_asset: USDT
     side: BUY
-  - role: hedge
+  - role: maker
     connector: hyperliquid_perpetual
     quote_asset: USD
     side: SELL
 
 pair:
-  base_asset: ETH
-  total_notional_usd: 100
-  max_notional_per_part: 50
+  base_asset: CFX
+  total_notional_usd: 1000
+  max_notional_per_part: 1000
   min_notional_per_part: 20
 
 execution:
-  leverage: 10
+  leverage: 5
   non_profitable_wait_sec: 1200
   fill_timeout_sec: 300
 
@@ -30,7 +30,7 @@ execution:
     ttl_sec: 15
 
   hedge:
-    min_hedge_notional_usd: 5
+    min_hedge_notional_usd: 10
 
 exit:
   funding_profitability_interval_hours: 24

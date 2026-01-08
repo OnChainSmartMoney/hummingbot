@@ -78,7 +78,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
 
         self._hedge_inflight: set[str] = set()
         self._hedge_inflight_amounts: Dict[str, Decimal] = {}
-        self._max_parallel_hedges: int = 2
 
         self._maker_pending_ids: set[str] = set()
         self._maker_cancel_pending: set[str] = set()
@@ -148,7 +147,7 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         )
         self.exit_hold_below_sec = getattr(config, "exit_hold_below_sec", None)
         self.hedge_min_notional_usd = getattr(
-            config, "hedge_min_notional_usd", Decimal("0")
+            config, "hedge_min_notional_usd", Decimal("10")
         )
         self.liquidation_limit_close_pct = getattr(
             config, "liquidation_limit_close_pct", Decimal("5")
@@ -255,7 +254,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
                     return
 
     def cancel_order(self, order: TrackedOrder, is_maker: bool):
-        exec_base = order.executed_amount_base or Decimal("0")
         conn = self.maker_connector if is_maker else self.hedge_connector
         pair = getattr(order.order, "trading_pair", None)
         if not pair:
@@ -269,8 +267,6 @@ class MakerHedgeSingleExecutor(ExecutorBase):
             self.logger().warning(
                 f"Cancel failed {order.order_id} on {conn}:{pair}: {e}"
             )
-        if exec_base <= 0:
-            self.remove_order(order.order_id, is_maker=is_maker)
 
     def _format_tracked_orders(self, orders: List[TrackedOrder]):
         return self._exposure_helper.format_tracked_orders(orders)
@@ -579,12 +575,8 @@ class MakerHedgeSingleExecutor(ExecutorBase):
         else:
             return self.side_hedge
 
-    def _market_name(self, market: ConnectorBase) -> str:
-        return (
-            getattr(market, "name", None)
-            or getattr(market, "connector_name", None)
-            or ""
-        )
+    def get_connector_name(self, market: ConnectorBase) -> str:
+        return getattr(market, "name", None)
 
     def process_order_created_event(
         self,

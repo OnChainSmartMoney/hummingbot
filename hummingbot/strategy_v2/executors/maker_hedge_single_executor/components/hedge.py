@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from hummingbot.core.data_type.common import OrderType, PositionAction, PriceType
+from hummingbot.core.data_type.common import OrderType, PositionAction
 from hummingbot.strategy_v2.models.executors import TrackedOrder
 
 if TYPE_CHECKING:
@@ -28,8 +28,6 @@ class HedgeHelper:
     def market_hedge(self, qty_base: Decimal):
         if qty_base <= 0:
             return
-        if len(self.exe._hedge_inflight) >= self.exe._max_parallel_hedges:
-            return
         order_id = self.exe.place_order(
             connector_name=self.exe.hedge_connector,
             trading_pair=self.exe.hedge_pair,
@@ -38,6 +36,7 @@ class HedgeHelper:
             amount=qty_base,
             position_action=(PositionAction.CLOSE if self.exe._closing else PositionAction.OPEN),
         )
+
         self.exe.add_order(TrackedOrder(order_id=order_id), is_maker=False)
         self.exe._hedge_inflight.add(order_id)
         self.exe._hedge_inflight_amounts[order_id] = qty_base
@@ -47,22 +46,15 @@ class HedgeHelper:
     def try_hedge_accumulated(self):
         if self.exe._hedge_accum_base <= 0:
             return
-        if len(self.exe._hedge_inflight) >= self.exe._max_parallel_hedges:
-            return
         try:
             hedge_connector = self.exe._strategy.connectors[self.exe.hedge_connector]
             q_amt = hedge_connector.quantize_order_amount(self.exe.hedge_pair, self.exe._hedge_accum_base)
         except Exception:
             q_amt = self.exe._hedge_accum_base
         if q_amt is None or q_amt <= 0:
+            self.exe.logger().warning(f"[Hedge] Accumulated qty {self.exe._hedge_accum_base} too small to hedge after quantization.")
             return
-        mid = self.exe.get_price(self.exe.hedge_connector, self.exe.hedge_pair, PriceType.MidPrice)
-        if mid.is_nan() or mid <= 0:
-            return
-        notional = q_amt * mid
-        min_notional = self.exe.hedge_min_notional_usd
-        if notional < min_notional:
-            return
+
         self.market_hedge(q_amt)
         self.exe._hedge_accum_base -= q_amt
 
